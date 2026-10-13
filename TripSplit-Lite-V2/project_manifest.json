@@ -1,0 +1,13 @@
+{
+  "applicationName": "TripSplit Lite",
+  "applicationId": "tripsplit-lite",
+  "version": "2.0.0",
+  "type": "Static Web Application",
+  "rootFolder": "TripSplit-Lite",
+  "iisFolder": "TripSplit-Lite",
+  "storage": "IndexedDB",
+  "schemaVersion": 2,
+  "externalDependencies": [],
+  "entryPoint": "index.html",
+  "cspFix": "Strict CSP compliant. Inline event handlers replaced with data-action event delegation."
+}
