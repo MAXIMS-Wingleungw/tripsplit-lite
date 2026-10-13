@@ -24,13 +24,18 @@ const Money = {
       }
       base = Money.allocate(e.baseAmountMinor, inputs.map(x => Number(x.value)));
     }
-    const adj = Money.allocate(Math.abs(e.adjustmentAmountMinor || 0), base);
-    return inputs.map((x, i) => ({
-      memberId: x.memberId,
-      baseShareMinor: base[i],
-      adjustmentShareMinor: e.adjustmentType === 'REFUND' ? -adj[i] : adj[i],
-      finalShareMinor: base[i] + (e.adjustmentType === 'REFUND' ? -adj[i] : adj[i])
-    }));
+    const hasAdj = e.adjustmentType === 'ADDITIVE_TAX' || e.adjustmentType === 'REFUND';
+    const adjAmount = hasAdj ? Math.abs(e.adjustmentAmountMinor || 0) : 0;
+    const adj = Money.allocate(adjAmount, base);
+    return inputs.map((x, i) => {
+      const adjShare = e.adjustmentType === 'REFUND' ? -adj[i] : (e.adjustmentType === 'ADDITIVE_TAX' ? adj[i] : 0);
+      return {
+        memberId: x.memberId,
+        baseShareMinor: base[i],
+        adjustmentShareMinor: adjShare,
+        finalShareMinor: base[i] + adjShare
+      };
+    });
   }
 };
 

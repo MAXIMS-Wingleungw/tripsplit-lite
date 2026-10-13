@@ -23,6 +23,25 @@ const App = {
 
   async reload() {
     for (const s of DB.stores) this.data[s] = await DB.all(s);
+    // 自動檢查並修復歷史帳目中因附加調整設為「無」卻誤計調整費的問題
+    let repaired = false;
+    for (const e of (this.data.expenses || [])) {
+      if (e.adjustmentType === 'NONE' && (e.adjustmentAmountMinor > 0 || (e.shares || []).some(s => s.finalShareMinor !== s.baseShareMinor))) {
+        e.adjustmentAmountMinor = 0;
+        e.adjustmentValue = 0;
+        if (e.shares) {
+          e.shares.forEach(s => {
+            s.adjustmentShareMinor = 0;
+            s.finalShareMinor = s.baseShareMinor;
+          });
+        }
+        await DB.put('expenses', e);
+        repaired = true;
+      }
+    }
+    if (repaired) {
+      for (const s of DB.stores) this.data[s] = await DB.all(s);
+    }
   },
 
   bind() {
@@ -768,8 +787,8 @@ const App = {
       const base = Money.toMinor(fAmount.value, currency);
       const isPct = fAdjMode.value === 'PERCENTAGE';
       const adjVal = Number(fAdj.value || 0);
-      const adj = isPct ? Math.round(base * adjVal / 100) : Money.toMinor(adjVal, currency);
       const type = fAdjType.value;
+      const adj = (type === 'NONE') ? 0 : (isPct ? Math.round(base * adjVal / 100) : Money.toMinor(adjVal, currency));
       const final = base + (type === 'ADDITIVE_TAX' ? adj : type === 'REFUND' ? -adj : 0);
 
       if (!fName.value.trim()) throw Error('請輸入帳目名稱');
@@ -1399,11 +1418,24 @@ const App = {
       };
     }).filter(x => x.paid !== 0 || x.shared !== 0 || x.settled !== 0);
 
+    const sumPaid = memberSummary.reduce((a, b) => a + b.paid, 0);
+    const sumShared = memberSummary.reduce((a, b) => a + b.shared, 0);
+    const sumNet = memberSummary.reduce((a, b) => a + b.net, 0);
+
     const html = `
       <div style="padding:10px 18px 24px">
         <!-- 區塊一：收支淨額彙總 -->
         <h3 style="margin-top:0">一、${currency} 收支淨額彙總</h3>
         <p class="muted" style="font-size:12px;margin:-4px 0 10px">公式：淨額 = 總付款代墊 (+) － 總分攤應付 (－) ＋ 沖銷還款 (±)</p>
+        
+        ${sumNet !== 0 ? `
+          <div style="background:#fff3cd;border:1px solid #ffeeba;color:#856404;padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:13px">
+            ⚠️ <b>帳目借貸不平衡警告：</b><br>
+            總付款代墊 (<b>${this.fmt(sumPaid, currency)}</b>) 與 總分攤應付 (<b>${this.fmt(sumShared, currency)}</b>) 存在 <b>${this.fmt(Math.abs(sumNet), currency)}</b> 差額！<br>
+            這會導致結算推導後仍有剩餘未平。請檢查下方「涵蓋之原始消費項目」中標註有【⚠️ 不平衡】的帳目。
+          </div>
+        ` : ''}
+
         <div class="daily-table-wrap">
           <table class="daily-table">
             <thead>
@@ -1426,6 +1458,15 @@ const App = {
                 </tr>
               `).join('') || '<tr><td colspan="5" class="muted" style="text-align:center">無收支資料</td></tr>'}
             </tbody>
+            <tfoot>
+              <tr style="font-weight:bold;background:#f8fafc">
+                <td>總計</td>
+                <td>${this.fmt(sumPaid, currency)}</td>
+                <td>${this.fmt(sumShared, currency)}</td>
+                <td>-</td>
+                <td class="${sumNet === 0 ? 'positive' : 'negative'}">${sumNet === 0 ? '平衡 ($0)' : this.fmt(sumNet, currency) + ' (差額)'}</td>
+              </tr>
+            </tfoot>
           </table>
         </div>
 
@@ -1469,15 +1510,23 @@ const App = {
               </tr>
             </thead>
             <tbody>
-              ${es.map(e => `
-                <tr>
-                  <td>${e.expenseDate}</td>
-                  <td><b>${this.esc(e.name)}</b> <span class="pill">${e.category}</span></td>
-                  <td><b>${this.fmt(e.finalAmountMinor, currency)}</b></td>
-                  <td>${e.payers.map(p => `${this.esc(names[p.memberId] || p.memberId)}: ${this.fmt(p.amountMinor, currency)}`).join('<br>')}</td>
-                  <td style="font-size:12px">${e.shares.map(s => `${this.esc(names[s.memberId] || s.memberId)}: ${this.fmt(s.finalShareMinor, currency)}`).join('<br>')}</td>
-                </tr>
-              `).join('') || '<tr><td colspan="5" class="muted" style="text-align:center">無消費項目</td></tr>'}
+              ${es.map(e => {
+                const pSum = e.payers.reduce((a, b) => a + b.amountMinor, 0);
+                const sSum = e.shares.reduce((a, b) => a + b.finalShareMinor, 0);
+                const isDiff = (pSum !== sSum);
+                return `
+                  <tr style="${isDiff ? 'background:#fff5f5' : ''}">
+                    <td>${e.expenseDate}</td>
+                    <td>
+                      <b>${this.esc(e.name)}</b> <span class="pill">${e.category}</span>
+                      ${isDiff ? `<div style="color:#dc2626;font-size:11px;font-weight:bold;margin-top:2px">⚠️ 付款(${this.fmt(pSum, currency)}) ≠ 分攤(${this.fmt(sSum, currency)})，差額：${this.fmt(sSum - pSum, currency)}</div>` : ''}
+                    </td>
+                    <td><b>${this.fmt(e.finalAmountMinor, currency)}</b></td>
+                    <td>${e.payers.map(p => `${this.esc(names[p.memberId] || p.memberId)}: ${this.fmt(p.amountMinor, currency)}`).join('<br>')}</td>
+                    <td style="font-size:12px">${e.shares.map(s => `${this.esc(names[s.memberId] || s.memberId)}: ${this.fmt(s.finalShareMinor, currency)}`).join('<br>')}</td>
+                  </tr>
+                `;
+              }).join('') || '<tr><td colspan="5" class="muted" style="text-align:center">無消費項目</td></tr>'}
             </tbody>
           </table>
         </div>
