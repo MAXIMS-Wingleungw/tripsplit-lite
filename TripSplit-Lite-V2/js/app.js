@@ -1836,11 +1836,41 @@ const App = {
 
     const dateSections = dates.map(d => {
       const items = groupedByDate[d];
+      const dayCurrencies = [...new Set(items.map(x => x.currency))];
+
+      const dayShareStrings = dayCurrencies.map(c => {
+        const sum = items
+          .filter(e => e.currency === c)
+          .reduce((total, e) => {
+            const s = e.shares.find(x => x.memberId === currentMember.id);
+            return total + (s?.finalShareMinor || 0);
+          }, 0);
+        return sum > 0 ? this.fmt(sum, c) : null;
+      }).filter(Boolean);
+      const dayShareTotalStr = dayShareStrings.length ? dayShareStrings.join(' + ') : this.fmt(0, this.trip?.defaultCurrency);
+
+      const dayPaidStrings = dayCurrencies.map(c => {
+        const sum = items
+          .filter(e => e.currency === c)
+          .reduce((total, e) => {
+            const p = e.payers.find(x => x.memberId === currentMember.id);
+            return total + (p?.amountMinor || 0);
+          }, 0);
+        return sum > 0 ? this.fmt(sum, c) : null;
+      }).filter(Boolean);
+      const dayPaidTotalStr = dayPaidStrings.length ? dayPaidStrings.join(' + ') : null;
+
       return `
         <div class="card" style="margin-bottom:14px">
           <div class="date-header">
-            <span>📅 ${d}</span>
-            <span class="muted" style="font-weight:normal;font-size:12px">${items.length} 筆帳目</span>
+            <div>
+              <span>📅 ${d}</span>
+              <span class="muted" style="font-weight:normal;font-size:12px;margin-left:6px">${items.length} 筆帳目</span>
+            </div>
+            <div style="text-align:right">
+              <span style="font-size:12px;font-weight:normal;color:var(--muted)">當日個人應攤：</span>
+              <b style="color:var(--p);font-size:15px">${dayShareTotalStr}</b>
+            </div>
           </div>
           ${items.map(e => {
             const personalShare = e.shares.find(s => s.memberId === currentMember.id);
@@ -1861,6 +1891,13 @@ const App = {
               </div>
             `;
           }).join('')}
+          <div style="border-top:1px dashed var(--line);margin-top:8px;padding-top:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-size:13px">
+            <span class="muted"><b>${d} 當日小計</b></span>
+            <div style="text-align:right">
+              <span>個人應攤總額：<b style="color:var(--p);font-size:14px">${dayShareTotalStr}</b></span>
+              ${dayPaidTotalStr ? `<span style="margin-left:12px;color:var(--success)">代墊付款：<b>${dayPaidTotalStr}</b></span>` : ''}
+            </div>
+          </div>
         </div>
       `;
     }).join('');

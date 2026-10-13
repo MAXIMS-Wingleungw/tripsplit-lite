@@ -561,6 +561,8 @@ th {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 @media (max-width: 900px) {
