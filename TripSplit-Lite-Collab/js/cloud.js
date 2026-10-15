@@ -14,12 +14,24 @@ const Cloud = {
   activeTripId: null,
   unsubscribers: [],
   status: 'offline', // 'offline' | 'connecting' | 'synced' | 'syncing' | 'error'
+  initError: null,
   isLocalChange: false,
 
+  // 清除物件中的 undefined 與非可序列化屬性，確保符合 Firestore 規範
+  clean(obj) {
+    if (!obj) return {};
+    const c = JSON.parse(JSON.stringify(obj));
+    delete c.attachments; // 排除大體積二進位圖檔
+    return c;
+  },
+
   async init() {
+    this.initError = null;
     if (typeof firebase === 'undefined') {
-      console.warn('Firebase SDK 未載入，以完全離線模式運行。');
+      this.initError = 'Firebase SDK 尚未載入（請確認伺服器上 js/vendor/ 檔案已完整複製）';
+      console.warn(this.initError);
       this.status = 'offline';
+      this.enabled = false;
       this.updateUI();
       return;
     }
@@ -28,12 +40,18 @@ const Cloud = {
         firebase.initializeApp(this.config);
       }
       this.db = firebase.firestore();
+      try {
+        this.db.settings({ ignoreUndefinedProperties: true });
+      } catch {}
       this.enabled = true;
       this.status = 'synced';
+      this.initError = null;
       this.updateUI();
     } catch (e) {
+      this.initError = e.message || String(e);
       console.warn('Firebase 初始化失敗：', e);
       this.status = 'error';
+      this.enabled = false;
       this.updateUI();
     }
   },
@@ -205,19 +223,17 @@ const Cloud = {
 
     this.isLocalChange = true;
     try {
+      const cleanData = this.clean(item);
       if (store === 'trips') {
-        await tripRef.set(item, { merge: true });
+        await tripRef.set(cleanData, { merge: true });
       } else if (store === 'members') {
-        await tripRef.collection('members').doc(item.id).set(item);
+        await tripRef.collection('members').doc(item.id).set(cleanData);
       } else if (store === 'expenses') {
-        // 排除大體積二進位資料
-        const cleanExp = { ...item };
-        delete cleanExp.attachments;
-        await tripRef.collection('expenses').doc(item.id).set(cleanExp);
+        await tripRef.collection('expenses').doc(item.id).set(cleanData);
       } else if (store === 'settlements') {
-        await tripRef.collection('settlements').doc(item.id).set(item);
+        await tripRef.collection('settlements').doc(item.id).set(cleanData);
       } else if (store === 'exchangeRates') {
-        await tripRef.collection('rates').doc(item.id).set(item);
+        await tripRef.collection('rates').doc(item.id).set(cleanData);
       }
     } catch (e) {
       console.warn('雲端寫入失敗：', e);
@@ -254,7 +270,12 @@ const Cloud = {
 
   // 一鍵將現有本機行程發佈至雲端共享
   async shareTrip(tripId) {
-    if (!this.enabled) throw Error('尚未連接到雲端服務，請檢查網路');
+    if (!this.enabled) {
+      await this.init();
+    }
+    if (!this.enabled) {
+      throw Error(this.initError || '無法連線至雲端服務，請確認網路是否正常');
+    }
     const trip = App.data.trips.find(x => x.id === tripId);
     if (!trip) throw Error('找不到此行程');
 
@@ -265,30 +286,28 @@ const Cloud = {
     trip.isShared = true;
     trip.updatedAt = new Date().toISOString();
 
-    // 批次上傳該行程的所有資料
+    // 批次上傳該行程的所有資料（經 clean 過濾）
     const batch = this.db.batch();
-    batch.set(tripRef, trip);
+    batch.set(tripRef, this.clean(trip));
 
     const members = App.items('members');
     for (const m of members) {
-      batch.set(tripRef.collection('members').doc(m.id), m);
+      batch.set(tripRef.collection('members').doc(m.id), this.clean(m));
     }
 
     const expenses = App.items('expenses');
     for (const e of expenses) {
-      const cleanExp = { ...e };
-      delete cleanExp.attachments;
-      batch.set(tripRef.collection('expenses').doc(e.id), cleanExp);
+      batch.set(tripRef.collection('expenses').doc(e.id), this.clean(e));
     }
 
     const settlements = App.items('settlements');
     for (const s of settlements) {
-      batch.set(tripRef.collection('settlements').doc(s.id), s);
+      batch.set(tripRef.collection('settlements').doc(s.id), this.clean(s));
     }
 
     const rates = App.items('exchangeRates');
     for (const r of rates) {
-      batch.set(tripRef.collection('rates').doc(r.id), r);
+      batch.set(tripRef.collection('rates').doc(r.id), this.clean(r));
     }
 
     await batch.commit();
@@ -309,7 +328,12 @@ const Cloud = {
 
   // 朋友透過行程代碼或連結加入
   async joinTrip(tripId) {
-    if (!this.enabled) throw Error('尚未連接到雲端服務，請檢查網路');
+    if (!this.enabled) {
+      await this.init();
+    }
+    if (!this.enabled) {
+      throw Error(this.initError || '無法連線至雲端服務，請確認網路是否正常');
+    }
     if (!tripId) throw Error('請輸入行程代碼');
 
     tripId = tripId.trim();

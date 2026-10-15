@@ -111,11 +111,14 @@ const App = {
 
     if (cloudStatus) {
       cloudStatus.onclick = () => {
-        if (!this.trip) return this.go('trips');
-        if (this.trip.isShared) {
+        if (!window.Cloud || !Cloud.enabled || Cloud.status === 'error') {
+          this.cloudStatusModal();
+        } else if (this.trip?.isShared) {
           this.shareModal(this.trip.id);
-        } else {
+        } else if (this.trip) {
           this.startShareTrip(this.trip.id);
+        } else {
+          this.go('trips');
         }
       };
     }
@@ -533,6 +536,35 @@ const App = {
       if (!val) throw Error('請輸入行程代碼或分享連結');
       const trip = await Cloud.joinTrip(val);
       this.msg(`成功加入行程「${trip.name}」！☁️`);
+    });
+  },
+
+  cloudStatusModal() {
+    const isSdk = typeof firebase !== 'undefined';
+    const isReady = !!window.Cloud?.enabled;
+    const err = window.Cloud?.initError;
+
+    this.openModal('☁️ 雲端服務連線狀態', `
+      <div class="share-box">
+        <p style="margin:6px 0"><b>Firebase SDK 狀態：</b> ${isSdk ? '<span style="color:#059669">🟢 已載入（本機 js/vendor/）</span>' : '<span style="color:#dc2626">🔴 未載入</span>'}</p>
+        <p style="margin:6px 0"><b>Firestore 資料庫：</b> ${isReady ? '<span style="color:#059669">🟢 連線就緒</span>' : '<span style="color:#dc2626">🔴 尚未連線</span>'}</p>
+        <p style="margin:6px 0"><b>專案 ID：</b> <code>tripsplit-26993</code></p>
+        ${err ? `<div class="modal-notice" style="display:block;margin-top:10px">⚠️ 錯誤訊息：${this.esc(err)}</div>` : ''}
+      </div>
+      <p class="muted" style="font-size:13px;line-height:1.6;margin-top:10px">
+        • 若 SDK 未載入，請確認伺服器上 <code>js/vendor/</code> 目錄已完整複製。<br>
+        • 若連線失敗，請檢查手機是否已連線至網際網路（Wi-Fi 或行動網路）。
+      </p>
+    `, async () => {
+      this.msg('正在嘗試重新連線至雲端... ☁️');
+      if (window.Cloud) {
+        await Cloud.init();
+      }
+      if (Cloud.enabled) {
+        this.msg('雲端已成功連線！🟢');
+      } else {
+        throw Error(Cloud.initError || '連線失敗，請檢查網路');
+      }
     });
   },
 

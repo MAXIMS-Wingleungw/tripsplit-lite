@@ -8,8 +8,8 @@
   "storage": "IndexedDB + Google Firebase Firestore (Multi-user Realtime Sync)",
   "schemaVersion": 2,
   "externalDependencies": [
-    "https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js",
-    "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"
+    "js/vendor/firebase-app-compat.js (Local Bundled)",
+    "js/vendor/firebase-firestore-compat.js (Local Bundled)"
   ],
   "entryPoint": "index.html",
   "cspFix": "Strict CSP compliant. Connected to Firebase Firestore."
