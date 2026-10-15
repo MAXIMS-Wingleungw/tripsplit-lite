@@ -1,0 +1,16 @@
+{
+  "applicationName": "TripSplit Lite (即時協同共享版)",
+  "applicationId": "tripsplit-lite",
+  "version": "2.1.0-Collab",
+  "type": "Static Web Application with Firebase Realtime Firestore Sync",
+  "rootFolder": "TripSplit-Lite-Collab",
+  "iisFolder": "TripSplit-Lite-Collab",
+  "storage": "IndexedDB + Google Firebase Firestore (Multi-user Realtime Sync)",
+  "schemaVersion": 2,
+  "externalDependencies": [
+    "https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js",
+    "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"
+  ],
+  "entryPoint": "index.html",
+  "cspFix": "Strict CSP compliant. Connected to Firebase Firestore."
+}
