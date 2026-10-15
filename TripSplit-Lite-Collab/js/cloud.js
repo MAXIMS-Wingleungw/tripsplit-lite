@@ -319,10 +319,17 @@ const Cloud = {
     return this.getShareUrl(tripId);
   },
 
-  // 取得分享連結
+  // 取得分享連結（確保以 index.html 為檔案路徑，避免 IIS/Web 伺服器目錄自動 301 重定向時把 ?trip= 參數吃掉）
   getShareUrl(tripId) {
     const url = new URL(window.location.href);
-    url.searchParams.set('trip', tripId);
+    let path = url.pathname;
+    if (!path.endsWith('.html')) {
+      if (!path.endsWith('/')) path += '/';
+      path += 'index.html';
+    }
+    url.pathname = path;
+    url.search = '?trip=' + encodeURIComponent(tripId);
+    url.hash = '';
     return url.toString();
   },
 
@@ -337,12 +344,12 @@ const Cloud = {
     if (!tripId) throw Error('請輸入行程代碼');
 
     tripId = tripId.trim();
-    // 支援直接貼入完整連結
-    if (tripId.includes('?trip=')) {
-      try {
-        const u = new URL(tripId);
-        tripId = u.searchParams.get('trip') || tripId;
-      } catch {}
+    // 支援直接貼入完整連結或含 trip= 的字串
+    if (tripId.includes('trip=')) {
+      const match = tripId.match(/trip=([^&#\s]+)/);
+      if (match && match[1]) {
+        tripId = decodeURIComponent(match[1]).trim();
+      }
     }
 
     this.status = 'syncing';

@@ -6,6 +6,32 @@ const App = {
   modalSave: null,
   modalMouseDown: null,
 
+  getTripIdFromUrl() {
+    // 1. 標準 search 參數 ?trip=...
+    try {
+      const p = new URLSearchParams(window.location.search);
+      const t = p.get('trip');
+      if (t) return t.trim();
+    } catch {}
+
+    // 2. hash 參數 #trip=... 或 #/?trip=...
+    try {
+      const hash = window.location.hash || '';
+      if (hash.includes('trip=')) {
+        const match = hash.match(/trip=([^&#\s]+)/);
+        if (match && match[1]) return decodeURIComponent(match[1]).trim();
+      }
+    } catch {}
+
+    // 3. 完整 href 正則匹配
+    try {
+      const match = window.location.href.match(/[?&#]trip=([^&#\s]+)/);
+      if (match && match[1]) return decodeURIComponent(match[1]).trim();
+    } catch {}
+
+    return null;
+  },
+
   async init() {
     try {
       await DB.open();
@@ -20,16 +46,22 @@ const App = {
       }
 
       // 檢查網址是否有分享參數 ?trip=...
-      const urlParams = new URLSearchParams(window.location.search);
-      const shareTripId = urlParams.get('trip');
-      if (shareTripId && window.Cloud && Cloud.enabled) {
+      const shareTripId = this.getTripIdFromUrl();
+      if (shareTripId && window.Cloud) {
         try {
+          this.msg('正在從雲端載入共享行程，請稍候... ☁️');
           const loadedTrip = await Cloud.joinTrip(shareTripId);
-          window.history.replaceState({}, document.title, window.location.pathname);
-          this.msg(`成功加入行程「${loadedTrip.name}」！☁️`);
+          try {
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete('trip');
+            cleanUrl.hash = '';
+            window.history.replaceState({}, document.title, cleanUrl.pathname);
+          } catch {}
+          this.msg(`成功加入行程「${loadedTrip.name}」！☁️ 已啟動多人即時同步`);
           return;
         } catch (err) {
-          this.msg('加入分享行程失敗：' + err.message);
+          console.warn('自動加入行程失敗：', err);
+          alert('加入共享行程失敗：' + err.message);
         }
       }
 
@@ -463,8 +495,14 @@ const App = {
     if (!t) return;
     const shareUrl = Cloud.getShareUrl(tripId);
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
     this.openModal(`☁️ 分享行程「${this.esc(t.name)}」`, `
+      ${isLocalhost ? `
+        <div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:10px 12px;border-radius:8px;font-size:12px;margin-bottom:12px;line-height:1.5">
+          ⚠️ <b>提醒</b>：您目前使用的網址為 <code>localhost</code>。朋友手機掃描無法連到 localhost，請在電腦改用局域網 IP（如 <code>http://192.168.x.x/...</code>）或伺服器網址開啟後再分享。
+        </div>
+      ` : ''}
       <div class="share-box">
         <label><b>專屬加入連結</b>（點擊右側按鈕複製）</label>
         <div class="share-url-row">
