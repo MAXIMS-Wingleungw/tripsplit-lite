@@ -41,7 +41,11 @@ const Cloud = {
       }
       this.db = firebase.firestore();
       try {
-        this.db.settings({ ignoreUndefinedProperties: true });
+        // experimentalForceLongPolling 解決 iOS Safari 及公司網路封鎖 WebSockets / gRPC WebChannel 的問題
+        this.db.settings({
+          ignoreUndefinedProperties: true,
+          experimentalForceLongPolling: true
+        });
       } catch {}
       this.enabled = true;
       this.status = 'synced';
