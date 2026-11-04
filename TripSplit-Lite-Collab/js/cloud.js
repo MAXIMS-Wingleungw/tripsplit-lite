@@ -132,7 +132,12 @@ const Cloud = {
           App.nav();
         }
       });
-    }, err => console.warn('Trip sync error:', err));
+    }, err => {
+      console.warn('Trip sync error:', err);
+      this.status = 'error';
+      this.initError = err.message || String(err);
+      this.updateUI();
+    });
     this.unsubscribers.push(unsubTrip);
 
     // 2. 監聽成員 members
@@ -150,7 +155,12 @@ const Cloud = {
       }
       if (!isFirstMembers && hasChange) this.onRemoteChange('成員');
       isFirstMembers = false;
-    }, err => console.warn('Members sync error:', err));
+    }, err => {
+      console.warn('Members sync error:', err);
+      this.status = 'error';
+      this.initError = err.message || String(err);
+      this.updateUI();
+    });
     this.unsubscribers.push(unsubMembers);
 
     // 3. 監聽帳目 expenses
@@ -168,7 +178,12 @@ const Cloud = {
       }
       if (!isFirstExpenses && hasChange) this.onRemoteChange('帳目');
       isFirstExpenses = false;
-    }, err => console.warn('Expenses sync error:', err));
+    }, err => {
+      console.warn('Expenses sync error:', err);
+      this.status = 'error';
+      this.initError = err.message || String(err);
+      this.updateUI();
+    });
     this.unsubscribers.push(unsubExpenses);
 
     // 4. 監聽結算 settlements
@@ -186,7 +201,12 @@ const Cloud = {
       }
       if (!isFirstSettlements && hasChange) this.onRemoteChange('還款');
       isFirstSettlements = false;
-    }, err => console.warn('Settlements sync error:', err));
+    }, err => {
+      console.warn('Settlements sync error:', err);
+      this.status = 'error';
+      this.initError = err.message || String(err);
+      this.updateUI();
+    });
     this.unsubscribers.push(unsubSettlements);
 
     // 5. 監聽匯率 exchangeRates
@@ -204,11 +224,46 @@ const Cloud = {
       }
       if (!isFirstRates && hasChange) this.onRemoteChange('匯率');
       isFirstRates = false;
-    }, err => console.warn('Rates sync error:', err));
+    }, err => {
+      console.warn('Rates sync error:', err);
+      this.status = 'error';
+      this.initError = err.message || String(err);
+      this.updateUI();
+    });
     this.unsubscribers.push(unsubRates);
 
     this.status = 'synced';
     this.updateUI();
+  },
+
+  // 主動測試與 Firestore 的即時通訊及讀寫權限
+  async testConnection() {
+    if (typeof firebase === 'undefined') {
+      return { ok: false, step: 'sdk', code: 'SDK_NOT_LOADED', message: 'Firebase SDK 尚未載入，請確認 js/vendor/ 檔案齊全' };
+    }
+    if (!this.enabled || !this.db) {
+      await this.init();
+    }
+    if (!this.enabled || !this.db) {
+      return { ok: false, step: 'init', code: 'INIT_FAILED', message: this.initError || '初始化失敗' };
+    }
+
+    const start = Date.now();
+    try {
+      // 測試讀取 shared_trips 集合
+      await this.db.collection('shared_trips').limit(1).get({ source: 'server' });
+      const latency = Date.now() - start;
+      return { ok: true, latency, message: `連線正常（延遲 ${latency}ms）` };
+    } catch (e) {
+      const code = e.code || 'UNKNOWN';
+      let message = e.message || String(e);
+      if (code === 'permission-denied') {
+        message = 'Firebase 安全規則拒絕存取（請至 Firebase 控制台將 Cloud Firestore 規則改為允許讀寫）';
+      } else if (code === 'unavailable') {
+        message = '網路無法連線至 Firestore 雲端伺服器（請檢查公司防火牆/代理伺服器或 Wi-Fi）';
+      }
+      return { ok: false, step: 'test', code, message };
+    }
   },
 
   unsubscribe() {
@@ -241,6 +296,12 @@ const Cloud = {
       }
     } catch (e) {
       console.warn('雲端寫入失敗：', e);
+      this.status = 'error';
+      this.initError = e.message || String(e);
+      this.updateUI();
+      if (e.code === 'permission-denied') {
+        App.msg('⚠️ 雲端同步失敗：Firebase 資料庫權限不足（請確認 Firebase 規則）');
+      }
     } finally {
       setTimeout(() => { this.isLocalChange = false; }, 600);
     }
@@ -267,6 +328,9 @@ const Cloud = {
       }
     } catch (e) {
       console.warn('雲端刪除失敗：', e);
+      this.status = 'error';
+      this.initError = e.message || String(e);
+      this.updateUI();
     } finally {
       setTimeout(() => { this.isLocalChange = false; }, 600);
     }

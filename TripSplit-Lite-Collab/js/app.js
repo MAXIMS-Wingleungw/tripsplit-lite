@@ -519,6 +519,10 @@ const App = {
         </div>
       </div>
 
+      <div style="margin:10px 0;text-align:right">
+        <button type="button" class="btn-sm" id="btnOpenCloudDiag">🔍 檢視雲端連線狀態與診斷</button>
+      </div>
+
       <div class="share-qr-wrap">
         <p class="muted" style="margin-bottom:8px"><b>📱 手機掃描 QR Code 即可加入</b></p>
         <img src="${qrUrl}" alt="QR Code" class="share-qr-img" onerror="this.style.display='none'">
@@ -556,6 +560,13 @@ const App = {
           });
         };
       }
+
+      const btnOpenCloudDiag = document.getElementById('btnOpenCloudDiag');
+      if (btnOpenCloudDiag) {
+        btnOpenCloudDiag.onclick = () => {
+          this.cloudStatusModal();
+        };
+      }
     }, 50);
   },
 
@@ -580,18 +591,32 @@ const App = {
   cloudStatusModal() {
     const isSdk = typeof firebase !== 'undefined';
     const isReady = !!window.Cloud?.enabled;
+    const isShared = !!this.trip?.isShared;
     const err = window.Cloud?.initError;
 
-    this.openModal('☁️ 雲端服務連線狀態', `
+    this.openModal('☁️ 雲端服務連線與診斷', `
       <div class="share-box">
         <p style="margin:6px 0"><b>Firebase SDK 狀態：</b> ${isSdk ? '<span style="color:#059669">🟢 已載入（本機 js/vendor/）</span>' : '<span style="color:#dc2626">🔴 未載入</span>'}</p>
-        <p style="margin:6px 0"><b>Firestore 資料庫：</b> ${isReady ? '<span style="color:#059669">🟢 連線就緒</span>' : '<span style="color:#dc2626">🔴 尚未連線</span>'}</p>
+        <p style="margin:6px 0"><b>Firestore 模組：</b> ${isReady ? '<span style="color:#059669">🟢 已初始化就緒</span>' : '<span style="color:#dc2626">🔴 尚未連線</span>'}</p>
+        <p style="margin:6px 0"><b>當前行程共享：</b> ${isShared ? '<span style="color:#059669">🟢 共享模式中（多人即時同步）</span>' : '<span style="color:#6b7280">⚪ 本機模式（尚未發佈共享）</span>'}</p>
         <p style="margin:6px 0"><b>專案 ID：</b> <code>tripsplit-26993</code></p>
+        <p style="margin:6px 0"><b>長輪詢相容模式：</b> <span style="color:#059669">🟢 已啟用 (Long-Polling)</span></p>
         ${err ? `<div class="modal-notice" style="display:block;margin-top:10px">⚠️ 錯誤訊息：${this.esc(err)}</div>` : ''}
       </div>
+
+      <div class="share-box" style="margin-top:12px;background:#f0fdf4;border-color:#bbf7d0">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <b>🔍 雲端讀寫權限即時檢測</b>
+          <button type="button" class="primary btn-sm" id="btnTestCloudPing">立即檢測連線</button>
+        </div>
+        <div id="cloudPingResult" style="margin-top:8px;font-size:13px;color:#374151">
+          點擊上方「立即檢測連線」以測試是否能成功連接 Firestore 伺服器並獲取讀寫權限。
+        </div>
+      </div>
+
       <p class="muted" style="font-size:13px;line-height:1.6;margin-top:10px">
-        • 若 SDK 未載入，請確認伺服器上 <code>js/vendor/</code> 目錄已完整複製。<br>
-        • 若連線失敗，請檢查手機是否已連線至網際網路（Wi-Fi 或行動網路）。
+        • 若顯示 <code>permission-denied</code>，表示 Firebase 安全規則過期或封鎖，請在 Firebase 控制台修改規則為允許讀寫。<br>
+        • 若顯示 <code>unavailable</code>，請檢查行動網路或 Wi-Fi 是否有防火牆阻擋。
       </p>
     `, async () => {
       this.msg('正在嘗試重新連線至雲端... ☁️');
@@ -604,6 +629,31 @@ const App = {
         throw Error(Cloud.initError || '連線失敗，請檢查網路');
       }
     });
+
+    setTimeout(() => {
+      const btn = document.getElementById('btnTestCloudPing');
+      const res = document.getElementById('cloudPingResult');
+      if (btn && res) {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = '檢測中...';
+          res.innerHTML = '<span style="color:#2563eb">⏳ 正在向 Firebase Firestore 發送讀取請求...</span>';
+          try {
+            const r = await Cloud.testConnection();
+            if (r.ok) {
+              res.innerHTML = `<span style="color:#059669;font-weight:bold">🟢 連線成功！</span> 回應時間：${r.latency}ms。資料庫通訊與權限皆正常。`;
+            } else {
+              res.innerHTML = `<span style="color:#dc2626;font-weight:bold">🔴 連線失敗 [${this.esc(r.code)}]</span><br><div style="margin-top:4px;color:#991b1b">${this.esc(r.message)}</div>`;
+            }
+          } catch (e) {
+            res.innerHTML = `<span style="color:#dc2626;font-weight:bold">🔴 檢測異常：</span> ${this.esc(e.message || String(e))}`;
+          } finally {
+            btn.disabled = false;
+            btn.textContent = '重新檢測';
+          }
+        };
+      }
+    }, 50);
   },
 
   tripModal() {
