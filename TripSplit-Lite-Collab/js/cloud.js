@@ -15,7 +15,13 @@ const Cloud = {
   unsubscribers: [],
   status: 'offline', // 'offline' | 'connecting' | 'synced' | 'syncing' | 'error'
   initError: null,
-  isLocalChange: false,
+  subscriptionVersion: 0,
+  collectionStores: {
+    members: 'members',
+    expenses: 'expenses',
+    settlements: 'settlements',
+    exchangeRates: 'rates'
+  },
 
   // 清除物件中的 undefined 與非可序列化屬性，確保符合 Firestore 規範
   clean(obj) {
@@ -26,6 +32,7 @@ const Cloud = {
   },
 
   async init() {
+    if (this.enabled && this.db) return;
     this.initError = null;
     if (typeof firebase === 'undefined') {
       this.initError = 'Firebase SDK 尚未載入（請確認伺服器上 js/vendor/ 檔案已完整複製）';
@@ -46,7 +53,9 @@ const Cloud = {
           ignoreUndefinedProperties: true,
           experimentalForceLongPolling: true
         });
-      } catch {}
+      } catch (e) {
+        console.warn('Firestore 設定未能套用：', e);
+      }
       this.enabled = true;
       this.status = 'synced';
       this.initError = null;
@@ -84,6 +93,10 @@ const Cloud = {
       el.className = 'cloud-status error';
       el.innerHTML = '<span class="cloud-dot"></span> 同步異常';
       el.title = '雲端連線失敗，請檢查網路';
+    } else if (this.activeTripId !== App.trip.id || this.status === 'connecting') {
+      el.className = 'cloud-status syncing';
+      el.innerHTML = '<span class="cloud-dot pulse"></span> 正在連線...';
+      el.title = '正在恢復此行程的雲端訂閱';
     } else {
       el.className = 'cloud-status synced';
       el.innerHTML = '<span class="cloud-dot"></span> 即時共享中 ☁️';
@@ -95,19 +108,31 @@ const Cloud = {
   pendingChanges: new Set(),
 
   onRemoteChange(type) {
-    if (this.isLocalChange) return;
+    const version = this.subscriptionVersion;
     this.pendingChanges.add(type);
     clearTimeout(this.remoteChangeTimer);
     this.remoteChangeTimer = setTimeout(async () => {
-      const types = Array.from(this.pendingChanges).join('、');
-      this.pendingChanges.clear();
-      await App.reload();
-      const modal = document.getElementById('modal');
-      if (!modal || modal.hidden) {
-        App.go(App.page);
+      try {
+        const types = Array.from(this.pendingChanges).join('、');
+        this.pendingChanges.clear();
+        await App.reload();
+        if (version !== this.subscriptionVersion) return;
+        const modal = document.getElementById('modal');
+        if (!modal || modal.hidden) {
+          App.go(App.page);
+        }
+        App.msg(`已即時同步雲端最新${types}資料 ☁️`);
+      } catch (err) {
+        if (version === this.subscriptionVersion) this.syncError(err);
       }
-      App.msg(`已即時同步雲端最新${types}資料 ☁️`);
     }, 300);
+  },
+
+  syncError(err) {
+    console.warn('雲端同步失敗：', err);
+    this.status = 'error';
+    this.initError = err.message || String(err);
+    this.updateUI();
   },
 
   // 開啟或切換當前行程的即時訂閱
@@ -116,127 +141,75 @@ const Cloud = {
     if (!this.enabled || !tripId) return;
 
     this.activeTripId = tripId;
+    const version = this.subscriptionVersion;
+    const isCurrent = () => version === this.subscriptionVersion;
     const tripRef = this.db.collection('shared_trips').doc(tripId);
+    const ready = new Set();
+    const markReady = (store, snap) => {
+      if (!snap.metadata.fromCache) ready.add(store);
+      if (ready.size === 5 && this.status !== 'error') {
+        this.status = 'synced';
+        this.updateUI();
+      }
+    };
+    const onError = err => {
+      if (isCurrent()) this.syncError(err);
+    };
+    this.status = 'connecting';
+    this.initError = null;
+    this.updateUI();
 
     // 1. 監聽 Trip 自身
-    let isFirstTrip = true;
-    const unsubTrip = tripRef.onSnapshot(doc => {
-      if (!doc.exists) return;
+    const unsubTrip = tripRef.onSnapshot({ includeMetadataChanges: true }, async doc => {
+      if (!isCurrent() || !doc.exists) return;
       if (doc.metadata.hasPendingWrites) return;
-      const t = doc.data();
-      DB.put('trips', t).then(() => {
-        if (!isFirstTrip) this.onRemoteChange('行程');
-        isFirstTrip = false;
+      try {
+        const t = { ...doc.data(), id: tripId, isShared: true };
+        await DB.put('trips', t);
+        if (!isCurrent()) return;
         if (App.trip?.id === tripId) {
           App.trip = t;
           App.nav();
         }
-      });
-    }, err => {
-      console.warn('Trip sync error:', err);
-      this.status = 'error';
-      this.initError = err.message || String(err);
-      this.updateUI();
-    });
+        this.onRemoteChange('行程');
+        markReady('trips', doc);
+      } catch (err) {
+        onError(err);
+      }
+    }, onError);
     this.unsubscribers.push(unsubTrip);
 
-    // 2. 監聽成員 members
-    let isFirstMembers = true;
-    const unsubMembers = tripRef.collection('members').onSnapshot(async snap => {
-      if (snap.metadata.hasPendingWrites) return;
-      let hasChange = false;
-      for (const ch of snap.docChanges()) {
-        if (!isFirstMembers || ch.type === 'modified') hasChange = true;
-        if (ch.type === 'removed') {
-          await DB.del('members', ch.doc.id);
-        } else {
-          await DB.put('members', ch.doc.data());
-        }
-      }
-      if (!isFirstMembers && hasChange) this.onRemoteChange('成員');
-      isFirstMembers = false;
-    }, err => {
-      console.warn('Members sync error:', err);
-      this.status = 'error';
-      this.initError = err.message || String(err);
-      this.updateUI();
-    });
-    this.unsubscribers.push(unsubMembers);
-
-    // 3. 監聽帳目 expenses
-    let isFirstExpenses = true;
-    const unsubExpenses = tripRef.collection('expenses').onSnapshot(async snap => {
-      if (snap.metadata.hasPendingWrites) return;
-      let hasChange = false;
-      for (const ch of snap.docChanges()) {
-        if (!isFirstExpenses || ch.type === 'modified') hasChange = true;
-        if (ch.type === 'removed') {
-          await DB.del('expenses', ch.doc.id);
-        } else {
-          await DB.put('expenses', ch.doc.data());
-        }
-      }
-      if (!isFirstExpenses && hasChange) this.onRemoteChange('帳目');
-      isFirstExpenses = false;
-    }, err => {
-      console.warn('Expenses sync error:', err);
-      this.status = 'error';
-      this.initError = err.message || String(err);
-      this.updateUI();
-    });
-    this.unsubscribers.push(unsubExpenses);
-
-    // 4. 監聽結算 settlements
-    let isFirstSettlements = true;
-    const unsubSettlements = tripRef.collection('settlements').onSnapshot(async snap => {
-      if (snap.metadata.hasPendingWrites) return;
-      let hasChange = false;
-      for (const ch of snap.docChanges()) {
-        if (!isFirstSettlements || ch.type === 'modified') hasChange = true;
-        if (ch.type === 'removed') {
-          await DB.del('settlements', ch.doc.id);
-        } else {
-          await DB.put('settlements', ch.doc.data());
-        }
-      }
-      if (!isFirstSettlements && hasChange) this.onRemoteChange('還款');
-      isFirstSettlements = false;
-    }, err => {
-      console.warn('Settlements sync error:', err);
-      this.status = 'error';
-      this.initError = err.message || String(err);
-      this.updateUI();
-    });
-    this.unsubscribers.push(unsubSettlements);
-
-    // 5. 監聽匯率 exchangeRates
-    let isFirstRates = true;
-    const unsubRates = tripRef.collection('rates').onSnapshot(async snap => {
-      if (snap.metadata.hasPendingWrites) return;
-      let hasChange = false;
-      for (const ch of snap.docChanges()) {
-        if (!isFirstRates || ch.type === 'modified') hasChange = true;
-        if (ch.type === 'removed') {
-          await DB.del('exchangeRates', ch.doc.id);
-        } else {
-          await DB.put('exchangeRates', ch.doc.data());
-        }
-      }
-      if (!isFirstRates && hasChange) this.onRemoteChange('匯率');
-      isFirstRates = false;
-    }, err => {
-      console.warn('Rates sync error:', err);
-      this.status = 'error';
-      this.initError = err.message || String(err);
-      this.updateUI();
-    });
-    this.unsubscribers.push(unsubRates);
-
-    this.status = 'synced';
-    this.updateUI();
+    const labels = { members: '成員', expenses: '帳目', settlements: '還款', exchangeRates: '匯率' };
+    for (const [store, collection] of Object.entries(this.collectionStores)) {
+      // 依序處理快照，避免較舊的非同步本機寫入覆蓋較新的資料。
+      let queue = Promise.resolve();
+      const unsub = tripRef.collection(collection).onSnapshot({ includeMetadataChanges: true }, snap => {
+        queue = queue.then(async () => {
+          if (!isCurrent() || snap.metadata.hasPendingWrites) return;
+          const remoteIds = new Set(snap.docs.map(doc => doc.id));
+          // 只有伺服器的完整快照可用來清除離線期間已被別人刪除的資料。
+          if (!snap.metadata.fromCache) {
+            const local = await DB.all(store);
+            for (const item of local) {
+              if (!isCurrent()) return;
+              if (item.tripId === tripId && !remoteIds.has(item.id)) await DB.del(store, item.id);
+            }
+          }
+          for (const doc of snap.docs) {
+            if (!isCurrent()) return;
+            await DB.put(store, { ...doc.data(), id: doc.id, tripId });
+          }
+          if (!isCurrent()) return;
+          this.onRemoteChange(labels[store]);
+          markReady(store, snap);
+        }).catch(onError);
+        return queue;
+      }, onError);
+      this.unsubscribers.push(unsub);
+    }
   },
 
-  // 主動測試與 Firestore 的即時通訊及讀寫權限
+  // 主動測試 Firestore 伺服器讀取；此檢測不會寫入使用者資料。
   async testConnection() {
     if (typeof firebase === 'undefined') {
       return { ok: false, step: 'sdk', code: 'SDK_NOT_LOADED', message: 'Firebase SDK 尚未載入，請確認 js/vendor/ 檔案齊全' };
@@ -246,6 +219,9 @@ const Cloud = {
     }
     if (!this.enabled || !this.db) {
       return { ok: false, step: 'init', code: 'INIT_FAILED', message: this.initError || '初始化失敗' };
+    }
+    if (App.trip?.isShared && (this.activeTripId !== App.trip.id || this.status === 'error')) {
+      this.subscribe(App.trip.id);
     }
 
     const start = Date.now();
@@ -267,6 +243,9 @@ const Cloud = {
   },
 
   unsubscribe() {
+    this.subscriptionVersion++;
+    clearTimeout(this.remoteChangeTimer);
+    this.pendingChanges.clear();
     this.unsubscribers.forEach(unsub => {
       try { unsub(); } catch {}
     });
@@ -276,11 +255,11 @@ const Cloud = {
 
   // 本地新增或更新時同步寫入雲端
   async put(store, item) {
-    if (!this.enabled || !App.trip?.isShared) return;
-    const tripId = App.trip.id;
+    if (store !== 'trips' && !this.collectionStores[store]) return;
+    if (!this.enabled || !this.db) throw Error('資料已存於本機，但雲端尚未連線，請重新連線後再儲存以同步');
+    const tripId = store === 'trips' ? item.id : item.tripId;
     const tripRef = this.db.collection('shared_trips').doc(tripId);
 
-    this.isLocalChange = true;
     try {
       const cleanData = this.clean(item);
       if (store === 'trips') {
@@ -295,25 +274,18 @@ const Cloud = {
         await tripRef.collection('rates').doc(item.id).set(cleanData);
       }
     } catch (e) {
-      console.warn('雲端寫入失敗：', e);
-      this.status = 'error';
-      this.initError = e.message || String(e);
-      this.updateUI();
-      if (e.code === 'permission-denied') {
-        App.msg('⚠️ 雲端同步失敗：Firebase 資料庫權限不足（請確認 Firebase 規則）');
-      }
-    } finally {
-      setTimeout(() => { this.isLocalChange = false; }, 600);
+      this.syncError(e);
+      throw Error('資料已存於本機，但雲端寫入失敗：' + (e.message || String(e)));
     }
   },
 
   // 本地刪除時同步刪除雲端
-  async del(store, id) {
-    if (!this.enabled || !App.trip?.isShared) return;
-    const tripId = App.trip.id;
+  async del(store, id, tripId = App.trip?.id) {
+    if (store !== 'trips' && !this.collectionStores[store]) return;
+    if (!this.enabled || !this.db) throw Error('本機資料已刪除，但雲端尚未連線，雲端刪除未完成');
+    if (store === 'trips') tripId = id;
     const tripRef = this.db.collection('shared_trips').doc(tripId);
 
-    this.isLocalChange = true;
     try {
       if (store === 'trips') {
         await tripRef.delete();
@@ -327,12 +299,8 @@ const Cloud = {
         await tripRef.collection('rates').doc(id).delete();
       }
     } catch (e) {
-      console.warn('雲端刪除失敗：', e);
-      this.status = 'error';
-      this.initError = e.message || String(e);
-      this.updateUI();
-    } finally {
-      setTimeout(() => { this.isLocalChange = false; }, 600);
+      this.syncError(e);
+      throw Error('本機資料已刪除，但雲端刪除失敗：' + (e.message || String(e)));
     }
   },
 
@@ -344,45 +312,56 @@ const Cloud = {
     if (!this.enabled) {
       throw Error(this.initError || '無法連線至雲端服務，請確認網路是否正常');
     }
-    const trip = App.data.trips.find(x => x.id === tripId);
-    if (!trip) throw Error('找不到此行程');
+    const localTrip = App.data.trips.find(x => x.id === tripId);
+    if (!localTrip) throw Error('找不到此行程');
+    const trip = { ...localTrip, isShared: true, updatedAt: new Date().toISOString() };
 
+    const previousStatus = this.status;
     this.status = 'syncing';
     this.updateUI();
 
     const tripRef = this.db.collection('shared_trips').doc(tripId);
-    trip.isShared = true;
-    trip.updatedAt = new Date().toISOString();
 
     // 批次上傳該行程的所有資料（經 clean 過濾）
     const batch = this.db.batch();
     batch.set(tripRef, this.clean(trip));
 
-    const members = App.items('members');
+    const members = App.data.members.filter(x => x.tripId === tripId);
     for (const m of members) {
       batch.set(tripRef.collection('members').doc(m.id), this.clean(m));
     }
 
-    const expenses = App.items('expenses');
+    const expenses = App.data.expenses.filter(x => x.tripId === tripId);
     for (const e of expenses) {
       batch.set(tripRef.collection('expenses').doc(e.id), this.clean(e));
     }
 
-    const settlements = App.items('settlements');
+    const settlements = App.data.settlements.filter(x => x.tripId === tripId);
     for (const s of settlements) {
       batch.set(tripRef.collection('settlements').doc(s.id), this.clean(s));
     }
 
-    const rates = App.items('exchangeRates');
+    const rates = App.data.exchangeRates.filter(x => x.tripId === tripId);
     for (const r of rates) {
       batch.set(tripRef.collection('rates').doc(r.id), this.clean(r));
     }
 
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch (err) {
+      this.syncError(err);
+      throw err;
+    }
 
     // 更新本地
     await DB.put('trips', trip);
-    this.subscribe(tripId);
+    if (App.trip?.id === tripId) {
+      App.trip = trip;
+      this.subscribe(tripId);
+    } else {
+      this.status = previousStatus;
+      this.updateUI();
+    }
 
     return this.getShareUrl(tripId);
   },
@@ -431,8 +410,7 @@ const Cloud = {
       throw Error('找不到此共享行程，請向發起人確認代碼或連結是否正確。');
     }
 
-    const tripData = doc.data();
-    tripData.isShared = true;
+    const tripData = { ...doc.data(), id: tripId, isShared: true };
     await DB.put('trips', tripData);
 
     // 下載子集合
@@ -458,9 +436,13 @@ const Cloud = {
 
     await App.reload();
     App.trip = tripData;
+    await App.rememberTrip();
     this.subscribe(tripId);
     App.go('dashboard');
 
     return tripData;
   }
 };
+
+// 頂層 const 不會成為 window 屬性；App 以此屬性判斷雲端功能是否存在。
+window.Cloud = Cloud;

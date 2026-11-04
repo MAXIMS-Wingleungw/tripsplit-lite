@@ -65,7 +65,7 @@ const App = {
         }
       }
 
-      this.trip = this.data.trips.find(x => x.status !== 'archived') || null;
+      this.restoreTrip();
       if (this.trip && this.trip.isShared && window.Cloud) {
         Cloud.subscribe(this.trip.id);
       } else if (window.Cloud) {
@@ -80,16 +80,31 @@ const App = {
 
   async saveItem(store, item) {
     await DB.put(store, item);
-    if (window.Cloud && this.trip?.isShared) {
+    const trip = store === 'trips' ? item :
+      (this.data.trips || []).find(x => x.id === item.tripId);
+    if (window.Cloud && trip?.isShared) {
       await Cloud.put(store, item);
     }
   },
 
   async deleteItem(store, id) {
+    const item = (this.data[store] || []).find(x => x.id === id);
+    const trip = store === 'trips' ? item :
+      (this.data.trips || []).find(x => x.id === item?.tripId);
     await DB.del(store, id);
-    if (window.Cloud && this.trip?.isShared) {
-      await Cloud.del(store, id);
+    if (window.Cloud && trip?.isShared) {
+      await Cloud.del(store, id, trip.id);
     }
+  },
+
+  restoreTrip() {
+    const lastTripId = (this.data.settings || []).find(x => x.id === 'lastTripId')?.value;
+    this.trip = this.data.trips.find(x => x.id === lastTripId && x.status !== 'archived') ||
+      this.data.trips.find(x => x.status !== 'archived') || null;
+  },
+
+  async rememberTrip() {
+    await DB.put('settings', { id: 'lastTripId', value: this.trip?.id || null });
   },
 
   async reload() {
@@ -184,30 +199,34 @@ const App = {
     });
 
     // CSP-safe 事件委派 (消除 inline onclick)
-    view.addEventListener('click', e => {
+    view.addEventListener('click', async e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
       const act = btn.dataset.action;
       const id = btn.dataset.id;
-      if (act === 'tripModal') return this.tripModal();
-      if (act === 'openTrip') return this.openTrip(id);
-      if (act === 'deleteTrip') return this.deleteTrip(id);
-      if (act === 'startShareTrip') return this.startShareTrip(id);
-      if (act === 'shareModal') return this.shareModal(id);
-      if (act === 'joinTripModal') return this.joinTripModal();
-      if (act === 'memberModal') return this.memberModal();
-      if (act === 'toggleMember') return this.toggleMember(id);
-      if (act === 'expenseModal') return this.expenseModal(id);
-      if (act === 'deleteExpense') return this.deleteExpense(id);
-      if (act === 'rateModal') return this.rateModal();
-      if (act === 'deleteRate') return this.deleteRate(id);
-      if (act === 'exportData') return this.exportData();
-      if (act === 'importClick') return document.getElementById('importFile')?.click();
-      if (act === 'recordSettlement') return this.recordSettlement(btn.dataset);
-      if (act === 'deleteSettlement') return this.deleteSettlement(id);
-      if (act === 'settlementDetail') return this.settlementDetailModal(btn.dataset.currency);
-      if (act === 'openMemberDetail') return this.go('memberDetail', id);
-      if (act === 'go') return this.go(btn.dataset.p, btn.dataset.id);
+      try {
+        if (act === 'tripModal') return this.tripModal();
+        if (act === 'openTrip') return await this.openTrip(id);
+        if (act === 'deleteTrip') return await this.deleteTrip(id);
+        if (act === 'startShareTrip') return await this.startShareTrip(id);
+        if (act === 'shareModal') return this.shareModal(id);
+        if (act === 'joinTripModal') return this.joinTripModal();
+        if (act === 'memberModal') return this.memberModal();
+        if (act === 'toggleMember') return await this.toggleMember(id);
+        if (act === 'expenseModal') return this.expenseModal(id);
+        if (act === 'deleteExpense') return await this.deleteExpense(id);
+        if (act === 'rateModal') return this.rateModal();
+        if (act === 'deleteRate') return await this.deleteRate(id);
+        if (act === 'exportData') return await this.exportData();
+        if (act === 'importClick') return document.getElementById('importFile')?.click();
+        if (act === 'recordSettlement') return await this.recordSettlement(btn.dataset);
+        if (act === 'deleteSettlement') return await this.deleteSettlement(id);
+        if (act === 'settlementDetail') return this.settlementDetailModal(btn.dataset.currency);
+        if (act === 'openMemberDetail') return this.go('memberDetail', id);
+        if (act === 'go') return this.go(btn.dataset.p, btn.dataset.id);
+      } catch (err) {
+        this.msg(err.message || String(err), 'error');
+      }
     });
 
     view.addEventListener('change', e => {
@@ -606,11 +625,11 @@ const App = {
 
       <div class="share-box" style="margin-top:12px;background:#f0fdf4;border-color:#bbf7d0">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <b>🔍 雲端讀寫權限即時檢測</b>
+          <b>🔍 雲端讀取連線即時檢測</b>
           <button type="button" class="primary btn-sm" id="btnTestCloudPing">立即檢測連線</button>
         </div>
         <div id="cloudPingResult" style="margin-top:8px;font-size:13px;color:#374151">
-          點擊上方「立即檢測連線」以測試是否能成功連接 Firestore 伺服器並獲取讀寫權限。
+          點擊上方「立即檢測連線」以測試 Firestore 伺服器讀取；寫入權限須以實際儲存結果確認。
         </div>
       </div>
 
@@ -624,6 +643,7 @@ const App = {
         await Cloud.init();
       }
       if (Cloud.enabled) {
+        if (this.trip?.isShared) Cloud.subscribe(this.trip.id);
         this.msg('雲端已成功連線！🟢');
       } else {
         throw Error(Cloud.initError || '連線失敗，請檢查網路');
@@ -641,7 +661,7 @@ const App = {
           try {
             const r = await Cloud.testConnection();
             if (r.ok) {
-              res.innerHTML = `<span style="color:#059669;font-weight:bold">🟢 連線成功！</span> 回應時間：${r.latency}ms。資料庫通訊與權限皆正常。`;
+              res.innerHTML = `<span style="color:#059669;font-weight:bold">🟢 讀取連線成功！</span> 回應時間：${r.latency}ms。寫入權限與即時訂閱狀態須另行確認。`;
             } else {
               res.innerHTML = `<span style="color:#dc2626;font-weight:bold">🔴 連線失敗 [${this.esc(r.code)}]</span><br><div style="margin-top:4px;color:#991b1b">${this.esc(r.message)}</div>`;
             }
@@ -707,6 +727,7 @@ const App = {
       };
       await this.saveItem('trips', o);
       this.trip = o;
+      await this.rememberTrip();
       if (window.Cloud) {
         Cloud.unsubscribe();
         Cloud.updateUI();
@@ -717,6 +738,7 @@ const App = {
 
   async openTrip(id) {
     this.trip = this.data.trips.find(x => x.id === id);
+    await this.rememberTrip();
     if (window.Cloud) {
       if (this.trip && this.trip.isShared) {
         Cloud.subscribe(this.trip.id);
@@ -746,6 +768,7 @@ const App = {
       Cloud?.unsubscribe?.();
       await this.reload();
       this.trip = this.data.trips.find(x => x.status !== 'archived') || null;
+      await this.rememberTrip();
       if (this.trip?.isShared && window.Cloud) {
         Cloud.subscribe(this.trip.id);
       }
@@ -2353,7 +2376,7 @@ const App = {
       }
       this.trip = null;
       await this.reload();
-      this.trip = this.data.trips.find(x => x.status !== 'archived') || null;
+      this.restoreTrip();
       if (this.trip && this.trip.isShared && window.Cloud) {
         Cloud.subscribe(this.trip.id);
       } else if (window.Cloud) {
