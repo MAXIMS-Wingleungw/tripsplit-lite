@@ -2,6 +2,46 @@ const Money = {
   digits: c => ['JPY', 'TWD', 'KRW'].includes(c) ? 0 : 2,
   toMinor: (v, c) => Math.round(Number(v || 0) * 10 ** Money.digits(c)),
   toMajor: (v, c) => (v || 0) / 10 ** Money.digits(c),
+  adjustment(e) {
+    if (e.adjustmentType === 'REFUND') {
+      if (e.refundReceived !== true) return 0;
+      const actual = e.refundReceivedAmountMinor;
+      if (!Number.isSafeInteger(actual) || actual < 0 || actual > e.baseAmountMinor) {
+        throw Error('實收退稅金額必須介乎零與基礎金額之間');
+      }
+      return actual;
+    }
+    return e.adjustmentType === 'ADDITIVE_TAX' ? Math.abs(e.adjustmentAmountMinor || 0) : 0;
+  },
+  finalAmount(e) {
+    const adjustment = Money.adjustment(e);
+    return e.baseAmountMinor + (e.adjustmentType === 'REFUND' ? -adjustment : adjustment);
+  },
+  normalizeRefund(e) {
+    if (e.adjustmentType !== 'REFUND') return e;
+    const normalized = {
+      ...e,
+      refundReceived: e.refundReceived === true,
+      refundReceivedAmountMinor: e.refundReceived === true ? e.refundReceivedAmountMinor : 0
+    };
+    if (e.refundReceived === undefined) normalized.refundLegacyPending = true;
+    normalized.finalAmountMinor = Money.finalAmount(normalized);
+    if (e.shares?.length) {
+      const amounts = Money.allocate(Money.adjustment(normalized), e.shares.map(s => s.baseShareMinor));
+      normalized.shares = e.shares.map((s, i) => ({
+        ...s,
+        adjustmentShareMinor: -amounts[i],
+        finalShareMinor: s.baseShareMinor - amounts[i]
+      }));
+    }
+    // 舊版付款人儲存的是扣除預計退稅後的淨額；恢復待收時按原付款比例還原。
+    if (e.payers?.length && e.payers.reduce((sum, p) => sum + p.amountMinor, 0) !== normalized.finalAmountMinor) {
+      const weights = e.payers.map(p => p.amountMinor);
+      const amounts = Money.allocate(normalized.finalAmountMinor, weights.some(w => w > 0) ? weights : weights.map(() => 1));
+      normalized.payers = e.payers.map((p, i) => ({ ...p, amountMinor: amounts[i] }));
+    }
+    return normalized;
+  },
   allocate(total, weights) {
     const sum = weights.reduce((a, b) => a + b, 0);
     if (sum <= 0) throw Error('分攤值必須大於零');
@@ -24,8 +64,7 @@ const Money = {
       }
       base = Money.allocate(e.baseAmountMinor, inputs.map(x => Number(x.value)));
     }
-    const hasAdj = e.adjustmentType === 'ADDITIVE_TAX' || e.adjustmentType === 'REFUND';
-    const adjAmount = hasAdj ? Math.abs(e.adjustmentAmountMinor || 0) : 0;
+    const adjAmount = Money.adjustment(e);
     const adj = Money.allocate(adjAmount, base);
     return inputs.map((x, i) => {
       const adjShare = e.adjustmentType === 'REFUND' ? -adj[i] : (e.adjustmentType === 'ADDITIVE_TAX' ? adj[i] : 0);

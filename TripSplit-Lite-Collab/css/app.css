@@ -301,6 +301,35 @@ th {
   gap: 13px;
   padding: 20px;
 }
+.plan-tabs, .plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.plan-day {
+  margin-bottom: 16px;
+}
+.plan-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.plan-notes {
+  white-space: pre-wrap;
+}
+.plan-completed .plan-content > b {
+  text-decoration: line-through;
+}
+.plan-check, .field label.plan-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+}
+.plan-row {
+  flex-wrap: wrap;
+  gap: 12px;
+}
 .field {
   display: flex;
   flex-direction: column;

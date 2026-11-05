@@ -6,7 +6,7 @@
   "rootFolder": "TripSplit-Lite-Collab",
   "iisFolder": "TripSplit-Lite-Collab",
   "storage": "IndexedDB + Google Firebase Firestore (Multi-user Realtime Sync)",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "externalDependencies": [
     "js/vendor/firebase-app-compat.js (Local Bundled)",
     "js/vendor/firebase-firestore-compat.js (Local Bundled)"

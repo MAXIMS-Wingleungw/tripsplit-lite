@@ -20,7 +20,8 @@ const Cloud = {
     members: 'members',
     expenses: 'expenses',
     settlements: 'settlements',
-    exchangeRates: 'rates'
+    exchangeRates: 'rates',
+    travelPlans: 'travelPlans'
   },
 
   // 清除物件中的 undefined 與非可序列化屬性，確保符合 Firestore 規範
@@ -147,7 +148,7 @@ const Cloud = {
     const ready = new Set();
     const markReady = (store, snap) => {
       if (!snap.metadata.fromCache) ready.add(store);
-      if (ready.size === 5 && this.status !== 'error') {
+      if (ready.size === Object.keys(this.collectionStores).length + 1 && this.status !== 'error') {
         this.status = 'synced';
         this.updateUI();
       }
@@ -179,7 +180,7 @@ const Cloud = {
     }, onError);
     this.unsubscribers.push(unsubTrip);
 
-    const labels = { members: '成員', expenses: '帳目', settlements: '還款', exchangeRates: '匯率' };
+    const labels = { members: '成員', expenses: '帳目', settlements: '還款', exchangeRates: '匯率', travelPlans: '旅遊計劃' };
     for (const [store, collection] of Object.entries(this.collectionStores)) {
       // 依序處理快照，避免較舊的非同步本機寫入覆蓋較新的資料。
       let queue = Promise.resolve();
@@ -264,14 +265,8 @@ const Cloud = {
       const cleanData = this.clean(item);
       if (store === 'trips') {
         await tripRef.set(cleanData, { merge: true });
-      } else if (store === 'members') {
-        await tripRef.collection('members').doc(item.id).set(cleanData);
-      } else if (store === 'expenses') {
-        await tripRef.collection('expenses').doc(item.id).set(cleanData);
-      } else if (store === 'settlements') {
-        await tripRef.collection('settlements').doc(item.id).set(cleanData);
-      } else if (store === 'exchangeRates') {
-        await tripRef.collection('rates').doc(item.id).set(cleanData);
+      } else {
+        await tripRef.collection(this.collectionStores[store]).doc(item.id).set(cleanData);
       }
     } catch (e) {
       this.syncError(e);
@@ -289,14 +284,8 @@ const Cloud = {
     try {
       if (store === 'trips') {
         await tripRef.delete();
-      } else if (store === 'members') {
-        await tripRef.collection('members').doc(id).delete();
-      } else if (store === 'expenses') {
-        await tripRef.collection('expenses').doc(id).delete();
-      } else if (store === 'settlements') {
-        await tripRef.collection('settlements').doc(id).delete();
-      } else if (store === 'exchangeRates') {
-        await tripRef.collection('rates').doc(id).delete();
+      } else {
+        await tripRef.collection(this.collectionStores[store]).doc(id).delete();
       }
     } catch (e) {
       this.syncError(e);
@@ -326,24 +315,10 @@ const Cloud = {
     const batch = this.db.batch();
     batch.set(tripRef, this.clean(trip));
 
-    const members = App.data.members.filter(x => x.tripId === tripId);
-    for (const m of members) {
-      batch.set(tripRef.collection('members').doc(m.id), this.clean(m));
-    }
-
-    const expenses = App.data.expenses.filter(x => x.tripId === tripId);
-    for (const e of expenses) {
-      batch.set(tripRef.collection('expenses').doc(e.id), this.clean(e));
-    }
-
-    const settlements = App.data.settlements.filter(x => x.tripId === tripId);
-    for (const s of settlements) {
-      batch.set(tripRef.collection('settlements').doc(s.id), this.clean(s));
-    }
-
-    const rates = App.data.exchangeRates.filter(x => x.tripId === tripId);
-    for (const r of rates) {
-      batch.set(tripRef.collection('rates').doc(r.id), this.clean(r));
+    for (const [store, collection] of Object.entries(this.collectionStores)) {
+      for (const item of (App.data[store] || []).filter(x => x.tripId === tripId)) {
+        batch.set(tripRef.collection(collection).doc(item.id), this.clean(item));
+      }
     }
 
     try {
@@ -414,24 +389,11 @@ const Cloud = {
     await DB.put('trips', tripData);
 
     // 下載子集合
-    const membersSnap = await tripRef.collection('members').get();
-    for (const d of membersSnap.docs) {
-      await DB.put('members', d.data());
-    }
-
-    const expensesSnap = await tripRef.collection('expenses').get();
-    for (const d of expensesSnap.docs) {
-      await DB.put('expenses', d.data());
-    }
-
-    const settlementsSnap = await tripRef.collection('settlements').get();
-    for (const d of settlementsSnap.docs) {
-      await DB.put('settlements', d.data());
-    }
-
-    const ratesSnap = await tripRef.collection('rates').get();
-    for (const d of ratesSnap.docs) {
-      await DB.put('exchangeRates', d.data());
+    for (const [store, collection] of Object.entries(this.collectionStores)) {
+      const snap = await tripRef.collection(collection).get();
+      for (const d of snap.docs) {
+        await DB.put(store, { ...d.data(), id: d.id, tripId });
+      }
     }
 
     await App.reload();

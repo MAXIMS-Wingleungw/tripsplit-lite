@@ -1,8 +1,8 @@
 const DB = {
   name: 'TripSplitLiteDB',
-  version: 2,
+  version: 3,
   db: null,
-  stores: ['trips', 'members', 'exchangeRates', 'expenses', 'attachments', 'settlements', 'settings'],
+  stores: ['trips', 'members', 'exchangeRates', 'expenses', 'attachments', 'settlements', 'settings', 'travelPlans'],
   open() {
     return new Promise((ok, bad) => {
       const r = indexedDB.open(this.name, this.version);
@@ -14,8 +14,13 @@ const DB = {
       };
       r.onsuccess = () => {
         this.db = r.result;
+        this.db.onversionchange = () => {
+          this.db.close();
+          alert('資料庫版本已更新，請重新整理此頁以繼續使用。');
+        };
         ok();
       };
+      r.onblocked = () => alert('請關閉其他已開啟的 TripSplit 分頁，再重新整理以完成資料庫升級。');
       r.onerror = () => bad(r.error);
     });
   },

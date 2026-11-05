@@ -6,7 +6,10 @@ const vm = require('node:vm');
 
 const source = name => readFileSync(path.join(__dirname, '..', 'js', name), 'utf8');
 const clone = value => structuredClone(value);
-const stores = ['trips', 'members', 'exchangeRates', 'expenses', 'attachments', 'settlements', 'settings'];
+const dbContext = vm.createContext({});
+vm.runInContext(source('database.js'), dbContext);
+const stores = Array.from(vm.runInContext('DB.stores', dbContext));
+const dbVersion = vm.runInContext('DB.version', dbContext);
 const trip = (id, isShared = true) => ({ id, name: id, isShared, status: 'active', defaultCurrency: 'HKD' });
 const expense = (id, tripId, name = id) => ({ id, tripId, name, adjustmentType: 'NONE', adjustmentAmountMinor: 0 });
 
@@ -105,6 +108,7 @@ async function browser(server, initial = {}, href = 'https://example.test/index.
     return elements.get(id);
   };
   const context = vm.createContext({
+    uid: require('node:crypto').randomUUID,
     URL, URLSearchParams, console: { warn() {}, log() {} },
     document: {
       title: 'TripSplit',
@@ -119,7 +123,7 @@ async function browser(server, initial = {}, href = 'https://example.test/index.
     clearTimeout: id => timers.delete(id),
     firebase: { apps: [{}], firestore: () => server },
     DB: {
-      stores,
+      stores, version: dbVersion,
       async open() {},
       async all(store) { return [...local[store].values()].map(clone); },
       async put(store, item) { local[store].set(item.id, clone(item)); return item; },
@@ -128,6 +132,7 @@ async function browser(server, initial = {}, href = 'https://example.test/index.
     }
   });
   context.window = context;
+  vm.runInContext(source('calculations.js'), context);
   vm.runInContext(source('cloud.js'), context);
   vm.runInContext(source('app.js').replace('App.init();', 'globalThis.appReady = App.init();'), context);
   const app = vm.runInContext('App', context);
@@ -172,7 +177,7 @@ test('startup exposes Cloud to window and restores the last selected shared trip
   assert.equal(client.context.window.Cloud, client.cloud);
   assert.equal(client.app.trip.id, 'shared');
   assert.equal(client.cloud.activeTripId, 'shared');
-  assert.equal(client.cloud.unsubscribers.length, 5);
+  assert.equal(client.cloud.unsubscribers.length, Object.keys(client.cloud.collectionStores).length + 1);
   await client.flush();
   assert.equal(client.cloud.status, 'synced');
   assert.match(client.elements.get('cloudStatus').innerHTML, /即時共享中/);
@@ -191,7 +196,7 @@ test('two independent clients synchronize adds, edits and deletes for every shar
   const b = await browser(server, { trips: [trip('shared')] });
   await a.flush();
   await b.flush();
-  for (const store of ['members', 'expenses', 'settlements', 'exchangeRates']) {
+  for (const store of Object.keys(a.cloud.collectionStores)) {
     const item = { id: store, tripId: 'shared', name: 'added' };
     await a.app.saveItem(store, item);
     await b.flush();
@@ -369,7 +374,7 @@ test('diagnostic retry initializes a previously unavailable SDK and restores sub
   client.context.firebase = { apps: [{}], firestore: () => server };
   assert.equal((await client.cloud.testConnection()).ok, true);
   await client.flush();
-  assert.equal(client.cloud.unsubscribers.length, 5);
+  assert.equal(client.cloud.unsubscribers.length, Object.keys(client.cloud.collectionStores).length + 1);
   assert.equal(client.cloud.activeTripId, 'shared');
   assert.match(client.elements.get('cloudStatus').innerHTML, /即時共享中/);
 });
@@ -385,4 +390,292 @@ test('deleting another shared trip targets its ID rather than the active trip', 
   assert.equal(server.documents.has('shared_trips/active'), true);
   assert.equal(server.documents.has('shared_trips/other'), false);
   assert.equal(client.cloud.activeTripId, 'active');
+});
+
+const refundExpense = (overrides = {}) => ({
+  id: 'refund', tripId: 'shared', name: 'Shopping', currency: 'HKD',
+  expenseDate: '2026-11-04', category: '購物',
+  baseAmountMinor: 10000, adjustmentType: 'REFUND',
+  adjustmentMode: 'AMOUNT', adjustmentValue: 10, adjustmentAmountMinor: 1000,
+  splitMethod: 'EQUAL',
+  payers: [{ memberId: 'A', amountMinor: 9000 }],
+  shares: [
+    { memberId: 'A', baseShareMinor: 5000, adjustmentShareMinor: -500, finalShareMinor: 4500, inputValue: 1 },
+    { memberId: 'B', baseShareMinor: 5000, adjustmentShareMinor: -500, finalShareMinor: 4500, inputValue: 1 }
+  ], finalAmountMinor: 9000,
+  ...overrides
+});
+
+test('legacy refunds become pending, restore gross shares/payers and recompute settlement without altering recorded repayments', async () => {
+  const server = new Firestore();
+  const client = await browser(server, {
+    trips: [trip('shared', false)],
+    members: ['A', 'B'].map(id => ({ id, tripId: 'shared', name: id })),
+    expenses: [refundExpense()],
+    settlements: [{ id: 'paid', tripId: 'shared', currency: 'HKD', fromMemberId: 'B', toMemberId: 'A', amountMinor: 1000 }]
+  });
+  const normalized = client.app.items('expenses')[0];
+  assert.equal(normalized.refundReceived, false);
+  assert.equal(normalized.refundLegacyPending, true);
+  assert.equal(normalized.refundReceivedAmountMinor, 0);
+  assert.equal(normalized.adjustmentAmountMinor, 1000);
+  assert.equal(normalized.finalAmountMinor, 10000);
+  assert.equal(normalized.payers[0].amountMinor, 10000);
+  assert.deepEqual(normalized.shares.map(s => s.finalShareMinor), [5000, 5000]);
+  assert.deepEqual(Array.from(client.app.balances('HKD'), b => b.amount), [4000, -4000]);
+  assert.equal(client.local.settlements.get('paid').amountMinor, 1000);
+  assert.match(client.app.refundStatus(normalized), /待收退稅/);
+  await client.app.reload();
+  assert.equal(client.app.items('expenses')[0].finalAmountMinor, 10000);
+});
+
+test('refund actual receipt, cancellation and re-confirmation synchronize and update settlement on both clients', async () => {
+  const server = new Firestore();
+  server.documents.set('shared_trips/shared', trip('shared'));
+  for (const id of ['A', 'B']) server.documents.set('shared_trips/shared/members/' + id, { id, tripId: 'shared', name: id });
+  server.documents.set('shared_trips/shared/expenses/refund', refundExpense());
+  const a = await browser(server, { trips: [trip('shared')] });
+  const b = await browser(server, { trips: [trip('shared')] });
+  await a.flush();
+  await b.flush();
+  assert.equal(b.app.items('expenses')[0].finalAmountMinor, 10000);
+  await a.app.saveItem('expenses', refundExpense({ refundReceived: true, refundReceivedAmountMinor: 700 }));
+  await b.flush();
+  const received = b.app.items('expenses')[0];
+  assert.equal(received.finalAmountMinor, 9300);
+  assert.equal(received.adjustmentAmountMinor, 1000);
+  assert.equal(received.payers[0].amountMinor, 9300);
+  assert.deepEqual(received.shares.map(s => s.finalShareMinor), [4650, 4650]);
+  assert.deepEqual(Array.from(b.app.balances('HKD'), x => x.amount), [4650, -4650]);
+  assert.match(b.app.refundStatus(received), /已收到退稅/);
+  await b.app.saveItem('expenses', { ...received, refundReceived: false });
+  await a.flush();
+  const pending = a.app.items('expenses')[0];
+  assert.equal(pending.refundReceivedAmountMinor, 0);
+  assert.equal(pending.finalAmountMinor, 10000);
+  assert.deepEqual(Array.from(a.app.balances('HKD'), x => x.amount), [5000, -5000]);
+  await a.app.saveItem('expenses', { ...pending, refundReceived: true, refundReceivedAmountMinor: 0 });
+  await b.flush();
+  assert.equal(b.app.items('expenses')[0].refundReceived, true);
+  assert.equal(b.app.items('expenses')[0].finalAmountMinor, 10000);
+  const restarted = await browser(server, b.saved());
+  await restarted.flush();
+  assert.equal(restarted.app.items('expenses')[0].refundReceived, true);
+});
+
+test('refund allocation uses actual amount for all split methods, currency precision and exact rounding', () => {
+  const context = vm.createContext({});
+  vm.runInContext(source('calculations.js'), context);
+  const money = vm.runInContext('Money', context);
+  for (const [splitMethod, inputs] of [
+    ['EQUAL', [{ memberId: 'A' }, { memberId: 'B' }, { memberId: 'C' }]],
+    ['EXACT', [{ memberId: 'A', value: 30 }, { memberId: 'B', value: 70 }]],
+    ['PERCENTAGE', [{ memberId: 'A', value: 30 }, { memberId: 'B', value: 70 }]],
+    ['SHARES', [{ memberId: 'A', value: 1 }, { memberId: 'B', value: 2 }]]
+  ]) {
+    const e = { baseAmountMinor: 100, adjustmentType: 'REFUND', adjustmentAmountMinor: 50, splitMethod };
+    assert.equal(money.shares(e, inputs).reduce((sum, s) => sum + s.finalShareMinor, 0), 100);
+    e.refundReceived = true;
+    e.refundReceivedAmountMinor = 7;
+    const shares = money.shares(e, inputs);
+    assert.equal(shares.reduce((sum, s) => sum + s.finalShareMinor, 0), 93);
+    assert.equal(shares.reduce((sum, s) => sum + s.adjustmentShareMinor, 0), -7);
+  }
+  assert.equal(money.toMinor(7.23, 'HKD'), 723);
+  assert.equal(money.toMinor(723, 'JPY'), 723);
+  for (const amount of [-1, 10001, NaN, undefined, 1.5, '700']) {
+    assert.throws(() => money.finalAmount(refundExpense({ refundReceived: true, refundReceivedAmountMinor: amount })), /實收退稅/);
+  }
+  assert.equal(money.finalAmount(refundExpense({ adjustmentType: 'ADDITIVE_TAX' })), 11000);
+  assert.equal(money.finalAmount(refundExpense({ adjustmentType: 'NONE' })), 10000);
+  assert.equal(money.finalAmount(refundExpense({ refundReceived: true, refundReceivedAmountMinor: 1200 })), 8800);
+  assert.equal(money.finalAmount(refundExpense({ refundReceived: true, refundReceivedAmountMinor: 10000 })), 0);
+  const taxable = { baseAmountMinor: 10000, adjustmentType: 'ADDITIVE_TAX', adjustmentAmountMinor: 1000, splitMethod: 'EQUAL' };
+  assert.equal(money.shares(taxable, [{ memberId: 'A' }, { memberId: 'B' }]).reduce((sum, s) => sum + s.finalShareMinor, 0), 11000);
+});
+
+test('legacy multi-payer migration stays balanced, including old full-estimate refunds', () => {
+  const context = vm.createContext({});
+  vm.runInContext(source('calculations.js'), context);
+  const money = vm.runInContext('Money', context);
+  const multi = refundExpense({ payers: [{ memberId: 'A', amountMinor: 6000 }, { memberId: 'B', amountMinor: 3000 }] });
+  assert.deepEqual(Array.from(money.normalizeRefund(multi).payers, p => p.amountMinor), [6667, 3333]);
+  const full = refundExpense({ adjustmentAmountMinor: 10000, finalAmountMinor: 0, payers: [{ memberId: 'A', amountMinor: 0 }] });
+  assert.equal(money.normalizeRefund(full).payers[0].amountMinor, 10000);
+});
+
+test('backup import and export preserve receipt fields and safely migrate legacy refunds', async () => {
+  const server = new Firestore();
+  const client = await browser(server);
+  const data = {
+    trips: [trip('shared', false)],
+    expenses: [
+      refundExpense({ id: 'legacy' }),
+      refundExpense({ id: 'confirmed', refundReceived: true, refundReceivedAmountMinor: 723 }),
+      refundExpense({ id: 'pending', refundReceived: false, refundReceivedAmountMinor: 0 })
+    ]
+  };
+  await client.app.importData({ text: async () => JSON.stringify({ application: { id: 'tripsplit-lite' }, data }) });
+  assert.equal(client.app.items('expenses').length, 3);
+  assert.equal(client.local.expenses.get('legacy').refundReceived, false);
+  assert.equal(client.local.expenses.get('confirmed').finalAmountMinor, 9277);
+  let exported;
+  client.context.Blob = Blob;
+  client.context.URL = {
+    createObjectURL(blob) { exported = blob; return 'blob:test'; },
+    revokeObjectURL() {}
+  };
+  client.context.document.createElement = () => ({ click() {} });
+  await client.app.exportData();
+  const backup = JSON.parse(await exported.text());
+  assert.equal(backup.data.expenses.find(e => e.id === 'confirmed').refundReceivedAmountMinor, 723);
+  assert.equal(backup.data.expenses.find(e => e.id === 'legacy').refundReceived, false);
+  assert.equal(backup.data.expenses.find(e => e.id === 'pending').adjustmentAmountMinor, 1000);
+});
+
+test('travel plans validate fields, sort by date/time, isolate trips and do not affect accounting', async () => {
+  const server = new Firestore();
+  const client = await browser(server, { trips: [trip('local', false), trip('other', false)] });
+  const add = values => client.app.saveTravelPlan({ kind: 'itinerary', name: 'Activity', date: '2026-11-06', ...values });
+  for (const date of ['', '2026-02-30', 'not-a-date']) await assert.rejects(add({ date }), /日期/);
+  for (const time of ['24:00', '09:60', '9:30']) await assert.rejects(add({ time }), /時間/);
+  await assert.rejects(add({ name: ' ' }), /活動名稱/);
+  await assert.rejects(add({ kind: 'unknown' }), /分類/);
+  const noTime = await add({ name: 'Flexible', time: '' });
+  await add({ name: 'Evening', time: '18:30' });
+  await add({ name: 'Morning', time: '09:00' });
+  await add({ name: 'Earlier date', date: '2026-11-05', time: '20:00' });
+  await client.app.reload();
+  assert.deepEqual(Array.from(client.app.sortedTravelPlans('itinerary'), x => x.name), ['Earlier date', 'Morning', 'Evening', 'Flexible']);
+  const edited = await client.app.saveTravelPlan({ ...noTime, name: 'Edited', location: 'Station', transport: 'Train', notes: 'Line 1' }, noTime.id);
+  assert.equal(edited.createdAt, noTime.createdAt);
+  await client.app.openTrip('other');
+  assert.equal(client.app.sortedTravelPlans('itinerary').length, 0);
+  await assert.rejects(client.app.saveTravelPlan(edited, edited.id), /找不到/);
+  await assert.rejects(client.app.toggleTravelPlan(edited.id), /找不到/);
+  await assert.rejects(client.app.deleteTravelPlan(edited.id), /找不到/);
+  await client.app.openTrip('local');
+  await client.app.deleteTravelPlan(noTime.id);
+  assert.equal(client.app.items('travelPlans').length, 3);
+  assert.equal(client.app.items('expenses').length, 0);
+  assert.equal(client.app.items('settlements').length, 0);
+  const reopened = await browser(server, client.saved());
+  assert.equal(reopened.app.items('travelPlans').length, 3);
+});
+
+test('travel plan CRUD and wish-list completion synchronize between independent users', async () => {
+  const server = new Firestore();
+  server.documents.set('shared_trips/shared', trip('shared'));
+  const a = await browser(server, { trips: [trip('shared')] });
+  const b = await browser(server, { trips: [trip('shared')] });
+  await a.flush();
+  await b.flush();
+  for (const kind of ['itinerary', 'food', 'shopping']) {
+    const item = await a.app.saveTravelPlan({
+      kind, name: kind, date: '2026-11-05', time: '',
+      location: 'Shop', transport: 'Walk', notes: 'Note', completed: false
+    });
+    await b.flush();
+    assert.equal(b.app.sortedTravelPlans(kind)[0].name, kind);
+    await b.app.saveTravelPlan({ ...item, name: 'Edited ' + kind }, item.id);
+    await a.flush();
+    assert.equal(a.app.sortedTravelPlans(kind)[0].name, 'Edited ' + kind);
+    if (kind !== 'itinerary') {
+      await b.app.toggleTravelPlan(item.id);
+      await a.flush();
+      assert.equal(a.app.sortedTravelPlans(kind)[0].completed, true);
+      await a.app.toggleTravelPlan(item.id);
+      await b.flush();
+      assert.equal(b.app.sortedTravelPlans(kind)[0].completed, false);
+    } else {
+      await assert.rejects(a.app.toggleTravelPlan(item.id), /清單項目/);
+    }
+    await a.app.deleteTravelPlan(item.id);
+    await b.flush();
+    assert.equal(b.app.sortedTravelPlans(kind).length, 0);
+  }
+});
+
+test('local plan publishing uploads the correct trip, joins download plans, and first snapshot removes offline deletions', async () => {
+  const server = new Firestore();
+  const item = { id: 'plan', tripId: 'target', kind: 'food', name: 'Cafe', completed: true };
+  const a = await browser(server, {
+    trips: [trip('local', false), trip('target', false)],
+    travelPlans: [item, { ...item, id: 'private', tripId: 'local' }]
+  });
+  await a.cloud.shareTrip('target');
+  assert.equal(server.documents.has('shared_trips/target/travelPlans/plan'), true);
+  assert.equal(server.documents.has('shared_trips/target/travelPlans/private'), false);
+  const b = await browser(server, {}, 'https://example.test/index.html?trip=target');
+  await b.flush();
+  assert.equal(b.app.items('travelPlans')[0].completed, true);
+  const saved = b.saved();
+  server.documents.delete('shared_trips/target/travelPlans/plan');
+  const reopened = await browser(server, saved);
+  await reopened.flush();
+  assert.equal(reopened.app.items('travelPlans').length, 0);
+  await a.app.deleteTrip('target');
+  assert.equal(a.local.travelPlans.has('plan'), false);
+  assert.equal(a.local.travelPlans.has('private'), true);
+});
+
+test('travel plan backup round trip includes schema 3 and imports old backups with empty planning data', async () => {
+  const server = new Firestore();
+  const client = await browser(server, {
+    trips: [trip('local', false)],
+    travelPlans: ['itinerary', 'food', 'shopping'].map(kind => ({
+      id: kind, tripId: 'local', kind, name: kind, date: '2026-11-04', time: '',
+      location: 'Place', transport: 'Bus', notes: 'Note', completed: kind === 'food'
+    }))
+  });
+  let exported;
+  client.context.Blob = Blob;
+  client.context.URL = {
+    createObjectURL(blob) { exported = blob; return 'blob:test'; }, revokeObjectURL() {}
+  };
+  client.context.document.createElement = () => ({ click() {} });
+  await client.app.exportData();
+  const backup = JSON.parse(await exported.text());
+  assert.equal(backup.schemaVersion, 3);
+  assert.equal(backup.data.travelPlans.length, 3);
+  await client.app.importData({ text: async () => JSON.stringify(backup) });
+  assert.equal(client.app.items('travelPlans').length, 3);
+  assert.equal(client.app.sortedTravelPlans('food')[0].completed, true);
+  delete backup.data.travelPlans;
+  backup.schemaVersion = 2;
+  await client.app.importData({ text: async () => JSON.stringify(backup) });
+  assert.equal(client.app.items('travelPlans').length, 0);
+  assert.equal(client.app.trip.id, 'local');
+});
+
+test('planning render escapes user text and retains selected tab after refresh', async () => {
+  const server = new Firestore();
+  const client = await browser(server, {
+    trips: [trip('local', false)],
+    travelPlans: [{ id: 'plan', tripId: 'local', kind: 'food', name: '<img src=x>', location: '<script>', notes: '</div>' }]
+  });
+  client.app.planTab = 'food';
+  client.app.travelPlans();
+  const html = client.elements.get('view').innerHTML;
+  assert.match(html, /&lt;img src=x&gt;/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;\/div&gt;/);
+  assert.doesNotMatch(html, /<img src=x>/);
+  assert.match(html, /aria-selected="true"[^>]+data-tab="food"/);
+  assert.equal(client.app.planTab, 'food');
+});
+
+test('planning write or listener permission failures remain explicit and cannot claim synced status', async () => {
+  const server = new Firestore();
+  server.documents.set('shared_trips/shared', trip('shared'));
+  const client = await browser(server, { trips: [trip('shared')] });
+  await client.flush();
+  const denied = Object.assign(Error('travelPlans permission denied'), { code: 'permission-denied' });
+  const listener = [...server.listeners].find(x => x.ref.path.endsWith('/travelPlans'));
+  listener.error(denied);
+  assert.equal(client.cloud.status, 'error');
+  assert.match(client.cloud.initError, /travelPlans/);
+  server.failure = denied;
+  await assert.rejects(client.app.saveTravelPlan({ kind: 'food', name: 'Local cache' }), /permission denied/);
+  assert.equal(client.local.travelPlans.size, 1);
 });
