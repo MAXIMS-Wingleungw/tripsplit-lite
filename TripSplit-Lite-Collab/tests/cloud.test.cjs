@@ -679,3 +679,107 @@ test('planning write or listener permission failures remain explicit and cannot 
   await assert.rejects(client.app.saveTravelPlan({ kind: 'food', name: 'Local cache' }), /permission denied/);
   assert.equal(client.local.travelPlans.size, 1);
 });
+
+test('central receipt confirmation preserves estimate, updates settlement and synchronizes cancellation', async () => {
+  const server = new Firestore();
+  server.documents.set('shared_trips/shared', trip('shared'));
+  server.documents.set('shared_trips/shared/expenses/refund', refundExpense({ refundReceived: false }));
+  const a = await browser(server, { trips: [trip('shared'), trip('other', false)] });
+  const b = await browser(server, { trips: [trip('shared')] });
+  await a.flush();
+  await b.flush();
+  for (const value of ['', -1, 'bad', 101]) await assert.rejects(a.app.saveRefundReceipt('refund', true, value), /實收/);
+  const snapshot = JSON.stringify(a.app.items('expenses')[0]);
+  await a.app.saveRefundReceipt('refund', true, '7', undefined, snapshot);
+  await b.flush();
+  const received = b.app.items('expenses')[0];
+  assert.equal(received.finalAmountMinor, 9300);
+  assert.equal(received.payers[0].amountMinor, 9300);
+  assert.equal(received.adjustmentAmountMinor, 1000);
+  assert.deepEqual(received.shares.map(x => x.finalShareMinor), [4650, 4650]);
+  await assert.rejects(b.app.saveRefundReceipt('refund', false, '', undefined, snapshot), /已由同行者更新/);
+  await b.app.saveRefundReceipt('refund', false, '');
+  await a.flush();
+  assert.equal(a.app.items('expenses')[0].finalAmountMinor, 10000);
+  assert.equal(a.app.items('expenses')[0].refundReceivedAmountMinor, 0);
+  await a.app.openTrip('other');
+  await assert.rejects(a.app.saveRefundReceipt('refund', true, 7), /目前旅程/);
+});
+
+test('central receipt multi-payer allocation must be explicitly balanced for confirmation and cancellation', async () => {
+  const client = await browser(new Firestore(), {
+    trips: [trip('shared', false)],
+    expenses: [refundExpense({ refundReceived: false, payers: [
+      { memberId: 'A', amountMinor: 6000 }, { memberId: 'B', amountMinor: 4000 }
+    ] })]
+  });
+  await assert.rejects(client.app.saveRefundReceipt('refund', true, 10), /核對/);
+  await assert.rejects(client.app.saveRefundReceipt('refund', true, 10, [60, 40]), /不會自動分配/);
+  await assert.rejects(client.app.saveRefundReceipt('refund', true, 10, [-1, 91]), /非負/);
+  await client.app.saveRefundReceipt('refund', true, 10, [60, 30]);
+  await client.app.reload();
+  assert.deepEqual(client.app.items('expenses')[0].payers.map(p => p.amountMinor), [6000, 3000]);
+  await assert.rejects(client.app.saveRefundReceipt('refund', false, '', [60, 30]), /不會自動分配/);
+  await client.app.saveRefundReceipt('refund', false, '', [60, 40]);
+  await client.app.reload();
+  assert.deepEqual(client.app.items('expenses')[0].payers.map(p => p.amountMinor), [6000, 4000]);
+});
+
+test('daily page shows one selected date, preserves date per trip and handles old/new time fields', async () => {
+  const client = await browser(new Firestore(), {
+    trips: [trip('local', false), trip('other', false)],
+    travelPlans: [
+      { id: 'legacy', tripId: 'local', kind: 'itinerary', name: 'Old activity', date: '2026-11-05', time: '10:00' },
+      { id: 'new', tripId: 'local', kind: 'itinerary', name: 'New activity', date: '2026-11-05', startTime: '09:00', endTime: '09:45' },
+      { id: 'other-day', tripId: 'local', kind: 'itinerary', name: 'Tomorrow', date: '2026-11-06', startTime: '' }
+    ]
+  });
+  assert.deepEqual(Array.from(client.app.sortedTravelPlans('itinerary'), x => x.id), ['new', 'legacy', 'other-day']);
+  client.app.travelPlans();
+  let html = client.elements.get('view').innerHTML;
+  assert.match(html, /09:00 ～ 09:45/);
+  assert.match(html, /Old activity/);
+  assert.doesNotMatch(html, />Tomorrow</);
+  await client.app.selectPlanDate('2026-11-06');
+  client.app.travelPlans();
+  html = client.elements.get('view').innerHTML;
+  assert.match(html, /Tomorrow/);
+  assert.doesNotMatch(html, /Old activity/);
+  await client.app.openTrip('other');
+  await client.app.selectPlanDate('2026-12-01');
+  await client.app.openTrip('local');
+  assert.equal(client.app.selectedPlanDate(), '2026-11-06');
+  const restarted = await browser(new Firestore(), client.saved());
+  assert.equal(restarted.app.selectedPlanDate(), '2026-11-06');
+});
+
+test('start/end time validation, shared persistence and backups preserve new and legacy fields', async () => {
+  const server = new Firestore();
+  server.documents.set('shared_trips/shared', trip('shared'));
+  const a = await browser(server, { trips: [trip('shared')] });
+  const b = await browser(server, { trips: [trip('shared')] });
+  await a.flush();
+  await b.flush();
+  const values = { kind: 'itinerary', name: 'Activity', date: '2026-11-05', startTime: '09:00', endTime: '10:30' };
+  await assert.rejects(a.app.saveTravelPlan({ ...values, endTime: '08:00' }), /早於/);
+  await assert.rejects(a.app.saveTravelPlan({ ...values, endTime: '24:00' }), /完結時間/);
+  const item = await a.app.saveTravelPlan(values);
+  await b.flush();
+  assert.equal(b.app.items('travelPlans')[0].startTime, '09:00');
+  assert.equal(b.app.items('travelPlans')[0].time, '09:00');
+  assert.equal(b.app.items('travelPlans')[0].endTime, '10:30');
+  const edited = await b.app.saveTravelPlan({ ...item, startTime: '', endTime: '' }, item.id);
+  assert.equal(edited.time, '');
+  await a.flush();
+  const restarted = await browser(server, a.saved());
+  await restarted.flush();
+  assert.equal(restarted.app.items('travelPlans')[0].endTime, '');
+  await restarted.app.importData({ text: async () => JSON.stringify({
+    application: { id: 'tripsplit-lite' }, data: {
+      trips: [trip('shared', false)], travelPlans: [item],
+      expenses: [refundExpense({ refundReceived: true, refundReceivedAmountMinor: 700 })]
+    }
+  }) });
+  assert.equal(restarted.app.items('travelPlans')[0].endTime, '10:30');
+  assert.equal(restarted.app.items('expenses')[0].refundReceivedAmountMinor, 700);
+});

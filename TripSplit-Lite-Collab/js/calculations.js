@@ -7,7 +7,7 @@ const Money = {
       if (e.refundReceived !== true) return 0;
       const actual = e.refundReceivedAmountMinor;
       if (!Number.isSafeInteger(actual) || actual < 0 || actual > e.baseAmountMinor) {
-        throw Error('實收退稅金額必須介乎零與基礎金額之間');
+        throw Error('實收退稅／回贈金額必須介乎零與基礎金額之間');
       }
       return actual;
     }
@@ -34,7 +34,7 @@ const Money = {
         finalShareMinor: s.baseShareMinor - amounts[i]
       }));
     }
-    // 舊版付款人儲存的是扣除預計退稅後的淨額；恢復待收時按原付款比例還原。
+    // 舊版付款人儲存的是扣除預計退稅／回贈後的淨額；恢復待收時按原付款比例還原。
     if (e.payers?.length && e.payers.reduce((sum, p) => sum + p.amountMinor, 0) !== normalized.finalAmountMinor) {
       const weights = e.payers.map(p => p.amountMinor);
       const amounts = Money.allocate(normalized.finalAmountMinor, weights.some(w => w > 0) ? weights : weights.map(() => 1));

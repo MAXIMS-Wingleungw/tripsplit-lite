@@ -220,6 +220,8 @@ const App = {
         if (act === 'startShareTrip') return await this.startShareTrip(id);
         if (act === 'shareModal') return this.shareModal(id);
         if (act === 'joinTripModal') return this.joinTripModal();
+        if (act === 'refundReceiptModal') return this.refundReceiptModal(id);
+        if (act === 'planDate') return await this.selectPlanDate(btn.dataset.date);
         if (act === 'planTab') {
           this.planTab = btn.dataset.tab;
           return this.go('travelPlans');
@@ -245,7 +247,11 @@ const App = {
       }
     });
 
-    view.addEventListener('change', e => {
+    view.addEventListener('change', async e => {
+      if (e.target?.id === 'planDate') {
+        try { await this.selectPlanDate(e.target.value); }
+        catch (err) { this.msg(err.message, 'error'); }
+      }
       if (e.target && e.target.id === 'importFile' && e.target.files?.[0]) {
         this.importData(e.target.files[0]);
       }
@@ -260,8 +266,8 @@ const App = {
     if (e.adjustmentType !== 'REFUND') return '';
     const expected = this.fmt(e.adjustmentAmountMinor, e.currency);
     return `<div class="muted" style="font-size:12px">${e.refundReceived === true
-      ? `已收到退稅：${this.fmt(e.refundReceivedAmountMinor, e.currency)}（預計 ${expected}）`
-      : `待收退稅：預計 ${expected}，未扣減結算`}${e.refundLegacyPending ? '；舊資料未有收款確認，請核對付款人金額並儲存' : ''}</div>`;
+      ? `已收到退稅／回贈：${this.fmt(e.refundReceivedAmountMinor, e.currency)}（預計 ${expected}）`
+      : `待收退稅／回贈：預計 ${expected}，未扣減結算`}${e.refundLegacyPending ? '；舊資料未有收款確認，請核對付款人金額並儲存' : ''}</div>`;
   },
 
   esc(s = '') {
@@ -315,6 +321,7 @@ const App = {
     const all = [
       ['dashboard', '總覽'],
       ['expenses', '帳目'],
+      ['refunds', '退稅／回贈'],
       ['travelPlans', '旅遊計劃'],
       ['settlements', '結算'],
       ['analytics', '統計'],
@@ -328,7 +335,7 @@ const App = {
     ).join('');
 
     // 修正一：手機底部導覽 [總覽, 帳目, 結算, 行程, 更多]
-    const isMoreActive = ['more', 'travelPlans', 'members', 'analytics', 'rates', 'settings', 'memberDetail'].includes(this.page);
+    const isMoreActive = ['more', 'refunds', 'travelPlans', 'members', 'analytics', 'rates', 'settings', 'memberDetail'].includes(this.page);
     mobileNav.innerHTML = [
       ['dashboard', '總覽', this.page === 'dashboard'],
       ['expenses', '帳目', this.page === 'expenses'],
@@ -354,7 +361,7 @@ const App = {
     const btnShareTrip = document.getElementById('btnShareTrip');
 
     tripBadge.textContent = this.trip ? `${this.trip.name} · ${this.trip.defaultCurrency}${this.trip.isShared ? ' (☁️)' : ''}` : '尚未選擇行程 (點擊切換)';
-    quickAdd.hidden = !this.trip || ['trips', 'settings', 'more', 'travelPlans'].includes(p);
+    quickAdd.hidden = !this.trip || ['trips', 'settings', 'more', 'travelPlans', 'refunds'].includes(p);
 
     if (btnShareTrip) {
       btnShareTrip.hidden = !this.trip || ['trips', 'settings', 'more'].includes(p);
@@ -368,6 +375,7 @@ const App = {
       trips: () => this.trips(),
       dashboard: () => this.dashboard(),
       expenses: () => this.expenses(),
+      refunds: () => this.refunds(),
       travelPlans: () => this.travelPlans(),
       members: () => this.members(),
       rates: () => this.rates(),
@@ -428,6 +436,10 @@ const App = {
     this.head('更多功能', '管理成員、統計分析、匯率、行程切換與資料備份');
     this.show(`
       <div class="menu-grid">
+        <div class="menu-card" data-action="go" data-p="refunds">
+          <div class="menu-icon">💰</div>
+          <div class="menu-info"><b>退稅／回贈</b><small>集中查看待收及已收金額、確認收到或取消確認</small></div>
+        </div>
         <div class="menu-card" data-action="go" data-p="travelPlans">
           <div class="menu-icon">🗓️</div>
           <div class="menu-info">
@@ -490,11 +502,96 @@ const App = {
 
   planKinds: { itinerary: '每日行程', food: '想食清單', shopping: '想買清單' },
 
+  refunds() {
+    this.head('退稅／回贈', `${this.trip.name} · 結算只扣減已確認實收金額`);
+    const names = Object.fromEntries(this.items('members').map(m => [m.id, m.name]));
+    const rows = this.items('expenses').filter(e => e.adjustmentType === 'REFUND').slice().sort((a, b) =>
+      Number(a.refundReceived === true) - Number(b.refundReceived === true) ||
+      (a.expenseDate || '').localeCompare(b.expenseDate || '') || a.id.localeCompare(b.id));
+    this.show(`<div class="notice">待收金額只供參考；確認或取消時會重算結算，既有還款紀錄不變。多位付款人須核對各自淨代墊。</div>
+      ${rows.length ? `<div class="card">${rows.map(e => `<div class="row plan-row">
+        <div><b>${this.esc(e.name)}</b><div class="muted">${this.esc(e.expenseDate)} · ${this.esc(e.currency)}</div>
+          ${this.refundStatus(e)}<div>預計：${this.fmt(e.adjustmentAmountMinor, e.currency)} · 實收：${e.refundReceived ? this.fmt(e.refundReceivedAmountMinor, e.currency) : '待確認'}</div>
+          <div class="muted">淨代墊：${e.payers.map(p => `${this.esc(names[p.memberId] || p.memberId)} ${this.fmt(p.amountMinor, e.currency)}`).join('、')}</div>
+        </div><button class="primary btn-sm" data-action="refundReceiptModal" data-id="${this.esc(e.id)}">${e.refundReceived ? '修改／取消確認' : '確認收到'}</button>
+      </div>`).join('')}</div>` : '<div class="empty">目前旅程尚未有退稅／回贈帳目；可在新增帳目選擇「退稅／回贈」。</div>'}`);
+  },
+
+  async saveRefundReceipt(id, received, actualValue, payerAmounts, expectedVersion) {
+    const old = this.items('expenses').find(e => e.id === id && e.adjustmentType === 'REFUND');
+    if (!old) throw Error('找不到目前旅程的退稅／回贈帳目');
+    if (expectedVersion && JSON.stringify(old) !== expectedVersion) throw Error('此帳目已由同行者更新，請關閉後重新開啟確認');
+    if (received && (String(actualValue).trim() === '' || !Number.isFinite(Number(actualValue)) || Number(actualValue) < 0)) {
+      throw Error('請輸入有效的實收退稅／回贈金額（可為零）');
+    }
+    const item = { ...old, refundReceived: received === true,
+      refundReceivedAmountMinor: received ? Money.toMinor(actualValue, old.currency) : 0 };
+    const final = Money.finalAmount(item);
+    if (old.payers.length === 1) {
+      item.payers = [{ ...old.payers[0], amountMinor: final }];
+    } else {
+      if (!old.payers.length || !Array.isArray(payerAmounts) || payerAmounts.length !== old.payers.length) {
+        throw Error('請核對每位付款人的實際淨代墊金額');
+      }
+      item.payers = old.payers.map((p, i) => {
+        const value = payerAmounts[i];
+        if (String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) throw Error('付款人淨代墊必須為有效的非負金額');
+        return { ...p, amountMinor: Money.toMinor(value, old.currency) };
+      });
+      if (item.payers.reduce((sum, p) => sum + p.amountMinor, 0) !== final) {
+        throw Error(`請按實際收款人調整各付款人淨代墊，合計必須為 ${this.fmt(final, old.currency)}；系統不會自動分配退稅／回贈`);
+      }
+    }
+    delete item.refundLegacyPending;
+    item.updatedAt = new Date().toISOString();
+    await this.saveItem('expenses', Money.normalizeRefund(item));
+  },
+
+  refundReceiptModal(id) {
+    const old = this.items('expenses').find(e => e.id === id && e.adjustmentType === 'REFUND');
+    if (!old) throw Error('找不到目前旅程的退稅／回贈帳目');
+    const tripId = this.trip.id;
+    const version = JSON.stringify(old);
+    const names = Object.fromEntries(this.items('members').map(m => [m.id, m.name]));
+    this.openModal('確認退稅／回贈', `
+      <div class="form-grid">
+        <div class="field full"><b>${this.esc(old.name)}</b><div>預計：${this.fmt(old.adjustmentAmountMinor, old.currency)} · 基礎金額：${this.fmt(old.baseAmountMinor, old.currency)}</div></div>
+        <div class="field full"><label class="plan-check"><input id="rReceived" type="checkbox" ${old.refundReceived ? 'checked' : ''}> 已收到退稅／回贈</label></div>
+        <div class="field full"><label for="rActual">實收金額（${this.esc(old.currency)}）</label><input id="rActual" type="number" min="0" step="${Money.digits(old.currency) ? '0.01' : '1'}" value="${old.refundReceived ? Money.toMajor(old.refundReceivedAmountMinor, old.currency) : ''}" ${old.refundReceived ? '' : 'disabled'}></div>
+        <div class="field full muted">取消勾選並儲存會退回待收並清除實收金額；預計金額保留。</div>
+        ${old.payers.length > 1 ? `<div class="field full"><b>核對各付款人淨代墊</b><div class="muted">請按誰實際收到款項調整；確認及取消都不會自動按比例分配。</div></div>
+          ${old.payers.map((p, i) => `<div class="field"><label for="rPayer${i}">${this.esc(names[p.memberId] || p.memberId)}</label><input class="refund-payer" id="rPayer${i}" type="number" min="0" step="${Money.digits(old.currency) ? '0.01' : '1'}" value="${Money.toMajor(p.amountMinor, old.currency)}"></div>`).join('')}` : '<div class="field full muted">單一付款人：淨代墊會自動調整為基礎金額減實收金額。</div>'}
+      </div>`, async () => {
+      if (this.trip?.id !== tripId) throw Error('目前旅程已切換，請重新開啟');
+      await this.saveRefundReceipt(id, document.getElementById('rReceived').checked,
+        document.getElementById('rActual').value,
+        old.payers.length > 1 ? old.payers.map((p, i) => document.getElementById(`rPayer${i}`).value) : undefined, version);
+    });
+    document.getElementById('rReceived').onchange = () => {
+      document.getElementById('rActual').disabled = !document.getElementById('rReceived').checked;
+    };
+  },
+
+  selectedPlanDate() {
+    const saved = (this.data.settings || []).find(x => x.id === `planDate:${this.trip.id}`)?.value;
+    return saved || this.sortedTravelPlans('itinerary')[0]?.date || this.trip.startDate || new Date().toISOString().slice(0, 10);
+  },
+
+  async selectPlanDate(date) {
+    const parsed = new Date(date + 'T00:00:00Z');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+      throw Error('請選擇有效日期');
+    }
+    await DB.put('settings', { id: `planDate:${this.trip.id}`, value: date });
+    await this.reload();
+    this.go('travelPlans');
+  },
+
   sortedTravelPlans(kind = this.planTab) {
     return this.items('travelPlans').filter(x => x.kind === kind).slice().sort((a, b) => {
       if (kind === 'itinerary') {
         return (a.date || '').localeCompare(b.date || '') ||
-          (a.time || '99:99').localeCompare(b.time || '99:99') ||
+          ((a.startTime ?? a.time) || '99:99').localeCompare((b.startTime ?? b.time) || '99:99') ||
           (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id);
       }
       return Number(!!a.completed) - Number(!!b.completed) ||
@@ -506,11 +603,15 @@ const App = {
     if (!Object.hasOwn(this.planKinds, this.planTab)) this.planTab = 'itinerary';
     const isDaily = this.planTab === 'itinerary';
     const rows = this.sortedTravelPlans();
+    const date = isDaily ? this.selectedPlanDate() : '';
+    const visibleRows = isDaily ? rows.filter(x => x.date === date) : rows;
+    const dates = [...new Set([...rows.map(x => x.date), date])].sort();
+    const dateIndex = dates.indexOf(date);
     this.head('旅遊計劃', `${this.trip.name} · 與同行者共同規劃，不連動分帳`);
     const renderRow = item => `
       <div class="row plan-row ${item.completed ? 'plan-completed' : ''}">
         <div class="plan-content">
-          ${isDaily ? `<div class="muted">${this.esc(item.time || '時間未定')}</div>` : ''}
+          ${isDaily ? `<div class="muted">${this.esc((item.startTime ?? item.time) || '開始時間未定')}${item.endTime ? ` ～ ${this.esc(item.endTime)}` : ''}</div>` : ''}
           <b>${this.esc(item.name)}</b>
           ${item.location ? `<div>地點${isDaily ? '' : '／店舖'}：${this.esc(item.location)}</div>` : ''}
           ${isDaily && item.transport ? `<div>交通：${this.esc(item.transport)}</div>` : ''}
@@ -524,10 +625,14 @@ const App = {
       </div>`;
     let content = '';
     if (isDaily) {
-      const dates = [...new Set(rows.map(x => x.date))];
-      content = dates.map(date => `<div class="card plan-day">
-        <h2>${this.esc(date)}</h2>${rows.filter(x => x.date === date).map(renderRow).join('')}
-      </div>`).join('');
+      content = `<div class="toolbar plan-tabs">
+        <button data-action="planDate" data-date="${this.esc(dates[dateIndex - 1] || '')}" ${dateIndex === 0 ? 'disabled' : ''}>上一個日期</button>
+        <label for="planDate">日期</label><input id="planDate" type="date" value="${this.esc(date)}">
+        <button data-action="planDate" data-date="${this.esc(dates[dateIndex + 1] || '')}" ${dateIndex === dates.length - 1 ? 'disabled' : ''}>下一個日期</button>
+        ${dates.filter(d => d !== date).map(d => `<button class="btn-sm" data-action="planDate" data-date="${this.esc(d)}">${this.esc(d)}</button>`).join('')}
+      </div><div class="card plan-day"><h2>${this.esc(date)}</h2>
+        ${visibleRows.map(renderRow).join('') || '<p class="muted">此日期尚未有行程，可點擊新增。</p>'}
+      </div>`;
     } else if (rows.length) {
       content = `<div class="card">${rows.map(renderRow).join('')}</div>`;
     }
@@ -536,7 +641,7 @@ const App = {
         ${Object.entries(this.planKinds).map(([kind, label]) => `<button role="tab" aria-selected="${kind === this.planTab}" class="${kind === this.planTab ? 'primary' : 'secondary'}" data-action="planTab" data-tab="${kind}">${label}</button>`).join('')}
       </div>
       <div class="toolbar"><button class="primary" data-action="travelPlanModal">＋ 新增${isDaily ? '行程' : '項目'}</button>
-        <span class="muted">${rows.length} 項${isDaily ? ' · 同日未定時間項目排在最後' : ` · 已完成 ${rows.filter(x => x.completed).length} 項`}</span>
+        <span class="muted">${visibleRows.length} 項${isDaily ? ' · 未定開始時間項目排在最後' : ` · 已完成 ${rows.filter(x => x.completed).length} 項`}</span>
       </div>
       ${content || `<div class="empty">尚未有${this.planKinds[this.planTab]}，點擊上方按鈕新增。</div>`}
     `);
@@ -551,17 +656,20 @@ const App = {
     const name = String(values.name || '').trim();
     if (!name) throw Error(kind === 'itinerary' ? '請輸入活動名稱' : '請輸入名稱');
     const date = kind === 'itinerary' ? String(values.date || '') : '';
-    const time = kind === 'itinerary' ? String(values.time || '') : '';
+    const time = kind === 'itinerary' ? String(values.startTime ?? values.time ?? '') : '';
+    const endTime = kind === 'itinerary' ? String(values.endTime || '') : '';
     if (kind === 'itinerary') {
       const parsed = new Date(date + 'T00:00:00Z');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
         throw Error('請輸入有效日期');
       }
       if (time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw Error('請輸入有效時間或留空');
+      if (endTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(endTime)) throw Error('請輸入有效完結時間或留空');
+      if (time && endTime && endTime < time) throw Error('完結時間不可早於開始時間；跨日活動請分開日期記錄');
     }
     const now = new Date().toISOString();
     const item = {
-      id: old?.id || uid(), tripId: this.trip.id, kind, name, date, time,
+      id: old?.id || uid(), tripId: this.trip.id, kind, name, date, time, startTime: time, endTime,
       location: String(values.location || '').trim(),
       transport: kind === 'itinerary' ? String(values.transport || '').trim() : '',
       notes: String(values.notes || '').trim(),
@@ -569,6 +677,9 @@ const App = {
       createdAt: old?.createdAt || now, updatedAt: now
     };
     await this.saveItem('travelPlans', item);
+    if (kind === 'itinerary') {
+      await DB.put('settings', { id: `planDate:${this.trip.id}`, value: date });
+    }
     return item;
   },
 
@@ -581,8 +692,9 @@ const App = {
     this.openModal(`${old ? '修改' : '新增'}${this.planKinds[kind]}`, `
       <div class="form-grid">
         ${isDaily ? `
-          <div class="field"><label for="pDate">日期 *</label><input id="pDate" type="date" value="${this.esc(old?.date || this.trip.startDate || new Date().toISOString().slice(0, 10))}"></div>
-          <div class="field"><label for="pTime">時間（選填）</label><input id="pTime" type="time" value="${this.esc(old?.time || '')}"></div>
+          <div class="field full"><label for="pDate">日期 *</label><input id="pDate" type="date" value="${this.esc(old?.date || this.selectedPlanDate())}"></div>
+          <div class="field"><label for="pTime">開始時間（選填）</label><input id="pTime" type="time" value="${this.esc(old?.startTime ?? old?.time ?? '')}"></div>
+          <div class="field"><label for="pEndTime">完結時間（選填）</label><input id="pEndTime" type="time" value="${this.esc(old?.endTime || '')}"></div>
         ` : ''}
         <div class="field full"><label for="pName">${isDaily ? '活動名稱' : '名稱'} *</label><input id="pName" value="${this.esc(old?.name || '')}"></div>
         <div class="field full"><label for="pLocation">${isDaily ? '地點' : '地點／店舖'}</label><input id="pLocation" value="${this.esc(old?.location || '')}"></div>
@@ -597,6 +709,7 @@ const App = {
         name: document.getElementById('pName').value,
         date: document.getElementById('pDate')?.value,
         time: document.getElementById('pTime')?.value,
+        endTime: document.getElementById('pEndTime')?.value,
         location: document.getElementById('pLocation').value,
         transport: document.getElementById('pTransport')?.value,
         notes: document.getElementById('pNotes').value,
@@ -1248,7 +1361,7 @@ const App = {
         <div class="field">
           <label>附加調整</label>
           <select id="fAdjType">
-            ${[['NONE', '無'], ['ADDITIVE_TAX', '外加稅／服務費 (+)'], ['REFUND', '退稅 (-)']].map(x => `
+            ${[['NONE', '無'], ['ADDITIVE_TAX', '外加稅／服務費 (+)'], ['REFUND', '退稅／回贈 (-)']].map(x => `
               <option value="${x[0]}" ${old?.adjustmentType === x[0] ? 'selected' : ''}>${x[1]}</option>
             `).join('')}
           </select>
@@ -1267,11 +1380,11 @@ const App = {
         </div>
 
         <div class="field full" id="refundFields" ${old?.adjustmentType === 'REFUND' ? '' : 'hidden'}>
-          <label style="justify-content:flex-start;gap:8px"><input id="fRefundReceived" type="checkbox" ${old?.refundReceived === true ? 'checked' : ''}> 已收到退稅</label>
-          <label for="fRefundActual">實收退稅金額（帳目幣別）</label>
+          <label style="justify-content:flex-start;gap:8px"><input id="fRefundReceived" type="checkbox" ${old?.refundReceived === true ? 'checked' : ''}> 已收到退稅／回贈</label>
+          <label for="fRefundActual">實收退稅／回贈金額（帳目幣別）</label>
           <input id="fRefundActual" type="number" min="0" step="${Money.digits(cur) === 0 ? '1' : '0.01'}" value="${old?.refundReceived === true ? Money.toMajor(old.refundReceivedAmountMinor, cur) : ''}" ${old?.refundReceived === true ? '' : 'disabled'}>
-          <div class="muted" id="refundHint">待收退稅：上方調整金額／百分比只作預計參考，未確認前不扣減結算。</div>
-          <div class="muted">確認後只扣減實收金額；付款人金額表示扣除退稅後的淨代墊。多位付款人請核對各自實際淨額。</div>
+          <div class="muted" id="refundHint">待收退稅／回贈：上方調整金額／百分比只作預計參考，未確認前不扣減結算。</div>
+          <div class="muted">確認後只扣減實收金額；付款人金額表示扣除退稅／回贈後的淨代墊。多位付款人請核對各自實際淨額。</div>
           ${old?.refundLegacyPending ? '<div class="notice">舊資料沒有收款確認，已改為待收並按原比例還原付款人金額；請核對實際付款分配。已記錄還款不會被改寫。</div>' : ''}
         </div>
 
@@ -1348,7 +1461,7 @@ const App = {
       const refundReceived = type === 'REFUND' && document.getElementById('fRefundReceived').checked;
       const actualInput = document.getElementById('fRefundActual').value;
       if (refundReceived && (!actualInput.trim() || !Number.isFinite(Number(actualInput)) || Number(actualInput) < 0)) {
-        throw Error('請輸入有效的實收退稅金額（可為零）');
+        throw Error('請輸入有效的實收退稅／回贈金額（可為零）');
       }
       const refundReceivedAmountMinor = refundReceived ? Money.toMinor(actualInput, currency) : 0;
       const final = Money.finalAmount({
@@ -1550,11 +1663,11 @@ const App = {
       const baseMinor = Money.toMinor(fAmount.value || 0, cur);
       const checkedPayers = [...document.querySelectorAll('.payerCheck:checked')];
       refundFields.hidden = fAdjType.value !== 'REFUND';
-      adjLabel.textContent = `${refundFields.hidden ? '調整' : '預計退稅'}${fAdjMode.value === 'PERCENTAGE' ? '百分比 (%)' : '金額'}`;
+      adjLabel.textContent = `${refundFields.hidden ? '調整' : '預計退稅／回贈'}${fAdjMode.value === 'PERCENTAGE' ? '百分比 (%)' : '金額'}`;
       fRefundActual.disabled = refundFields.hidden || !fRefundReceived.checked;
       refundHint.textContent = fRefundReceived.checked
-        ? '已收到退稅：結算只扣減實收金額，上方金額／百分比保留作預計參考。'
-        : '待收退稅：上方金額／百分比只作預計參考，未扣減結算。';
+        ? '已收到退稅／回贈：結算只扣減實收金額，上方金額／百分比保留作預計參考。'
+        : '待收退稅／回贈：上方金額／百分比只作預計參考，未扣減結算。';
 
       // 付款人自動連動（單人自動填入全額）
       if (['amount', 'currency', 'adj', 'adjMode', 'refund'].includes(changedSource) && checkedPayers.length === 1) {
@@ -1911,8 +2024,8 @@ const App = {
       const s = Debt.suggest(b);
       const refunds = this.items('expenses').filter(e => e.currency === c && e.adjustmentType === 'REFUND');
       return `
-        ${refunds.length ? `<div class="notice">${c} 結算只扣減已確認的實收退稅，待收金額不扣減。
-          ${refunds.some(e => e.refundLegacyPending) ? '舊退稅資料缺少收款確認，已按待收處理；請先於帳目核對付款人金額及收款狀態。' : ''}
+        ${refunds.length ? `<div class="notice">${c} 結算只扣減已確認的實收退稅／回贈，待收金額不扣減。
+          ${refunds.some(e => e.refundLegacyPending) ? '舊退稅／回贈資料缺少收款確認，已按待收處理；請先於帳目核對付款人金額及收款狀態。' : ''}
         </div>` : ''}
         <div class="grid" style="margin-bottom:20px">
           <div class="card">
